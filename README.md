@@ -1,30 +1,30 @@
 # Media Editor
 
-MP4 videolar için özelleştirilmiş, Türkçe ve İngilizce Windows video editörü.
+A modern Windows video editor for MP4 files with both English and Turkish language support.
 
-- Kırpma ve bölüm çıkarma
-- Başa, sona veya kaynak zamanına video ekleme
-- Görsel bindirme
-- Yatay/dikey encoding profilleri
-- CPU ve GPU hızlandırma
-- Kalıcı hızlı ayarlar
-- İşlem öncesi doğrulama ve güvenli iptal
-- FFprobe ile kesin ana-kare doğrulaması
-- Güvenli koşullarda kayıpsız kırpma/birleştirme, diğer her durumda full encoding
+## Features
 
-## GitHub üzerinden EXE oluşturma
+- Trim videos and remove sections
+- Insert videos at the beginning, end, or a specific timestamp
+- Image overlay support
+- Horizontal and vertical encoding profiles
+- CPU and GPU acceleration
+- Persistent quick settings
+- Pre-processing validation and safe cancellation
+- Accurate keyframe validation with FFprobe
+- Lossless trimming/merging when safe, full re-encoding only when required
 
-Her `main` güncellemesinde GitHub Actions iki bağımsız EXE üretir:
+## Building the EXE with GitHub
+
+Every update pushed to the `main` branch automatically builds two standalone executables using GitHub Actions:
 
 - `MediaEditor-Win10-Win11.exe`
 - `MediaEditor-Win7.exe`
 
-`v1.0.0` benzeri bir Git etiketi gönderildiğinde iki EXE otomatik olarak aynı
-GitHub Release içine eklenir. Hedef bilgisayarda Python, Conda veya FFmpeg
-kurulması gerekmez.
+When a Git tag such as `v1.1.0` is pushed, both executables are automatically attached to the corresponding GitHub Release.
 
-## English
+No installation of Python, Conda, or FFmpeg is required on the target computer.
 
-Media Editor is a Turkish/English Windows video editor tailored for fast MP4
-trimming, merging, overlays, encoding profiles, CPU/GPU processing and reusable
-quick settings.
+## About
+
+Media Editor is a lightweight Windows application designed for fast and reliable MP4 editing. It provides precise trimming, merging, overlays, customizable encoding profiles, hardware acceleration, and reusable quick settings while minimizing unnecessary re-encoding to preserve video quality.
