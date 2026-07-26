@@ -1,0 +1,85 @@
+name: Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: Win10-Win11
+            python: "3.11"
+            requirements: requirements-build.txt
+          - target: Win7
+            python: "3.8"
+            requirements: requirements-win7.txt
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: ${{ matrix.requirements }}
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r ${{ matrix.requirements }}
+
+      - name: Prepare Windows 7 FFmpeg
+        if: matrix.target == 'Win7'
+        shell: python
+        run: |
+          import imageio_ffmpeg
+          import shutil
+          shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(), "ffmpeg.exe")
+
+      - name: Build EXE
+        run: python -m PyInstaller --clean --noconfirm MediaEditor.spec
+
+      - name: Create distribution filename
+        shell: pwsh
+        run: Move-Item -LiteralPath dist\MediaEditor.exe -Destination "dist\MediaEditor-${{ matrix.target }}.exe"
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaEditor-${{ matrix.target }}
+          path: dist/MediaEditor-${{ matrix.target }}.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download both EXE files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: MediaEditor-*
+          path: release
+          merge-multiple: true
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/*.exe --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/*.exe --repo "$GITHUB_REPOSITORY" --generate-notes
+          fi
