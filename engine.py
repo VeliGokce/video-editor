@@ -42,6 +42,8 @@ class EncodeSettings:
     audio_kbps: int
     device: str = "cpu"
     preset: str = "fast"
+    rate_mode: str = "bitrate"
+    quality: int = 23
 
 
 @dataclass
@@ -184,6 +186,10 @@ def validate(job: Job) -> tuple[MediaInfo, float]:
     enc = job.encode
     if min(enc.width, enc.height, enc.fps, enc.video_mbps, enc.audio_kbps) <= 0:
         raise MontageError("Encoding değerleri sıfırdan büyük olmalıdır.")
+    if enc.rate_mode not in ("bitrate", "quality"):
+        raise MontageError("Geçersiz bitrate kontrol modu.")
+    if not 0 <= enc.quality <= 51:
+        raise MontageError("Kalite değeri 0 ile 51 arasında olmalıdır.")
     if enc.width % 2 or enc.height % 2:
         raise MontageError("Çözünürlük değerleri çift sayı olmalıdır.")
     return source, total
@@ -210,11 +216,34 @@ def encoder_args(settings: EncodeSettings) -> list[str]:
                 "ultrafast": "p1", "superfast": "p2", "veryfast": "p3",
                 "faster": "p4", "fast": "p5", "medium": "p6", "slow": "p7",
             }
-            return ["-c:v", selected, "-preset",
-                    nvenc_presets.get(settings.preset, "p4")]
+            args = ["-c:v", selected, "-preset",
+                    nvenc_presets.get(settings.preset, "p4"), "-rc", "vbr"]
+            if settings.rate_mode == "quality":
+                args += ["-cq", str(settings.quality), "-b:v", "0"]
+            return args
+        if settings.rate_mode == "quality" and selected.endswith("_qsv"):
+            return ["-c:v", selected, "-global_quality", str(settings.quality)]
+        if settings.rate_mode == "quality" and selected.endswith("_amf"):
+            return [
+                "-c:v", selected, "-rc", "qvbr",
+                "-qvbr_quality_level", str(settings.quality)]
         return ["-c:v", selected]
     codec_map = {"h264": "libx264", "h265": "libx265"}
-    return ["-c:v", codec_map.get(codec, codec), "-preset", settings.preset]
+    args = ["-c:v", codec_map.get(codec, codec), "-preset", settings.preset]
+    if settings.rate_mode == "quality":
+        args += ["-crf", str(settings.quality)]
+    return args
+
+
+def rate_control_args(settings: EncodeSettings) -> list[str]:
+    if settings.rate_mode == "quality":
+        return [
+            "-maxrate", f"{settings.video_mbps:g}M",
+            "-bufsize", f"{settings.video_mbps * 2:g}M"]
+    return [
+        "-b:v", f"{settings.video_mbps:g}M",
+        "-maxrate", f"{settings.video_mbps + 2:g}M",
+        "-bufsize", f"{settings.video_mbps * 2:g}M"]
 
 
 def benchmark_encode(source: Path, settings: EncodeSettings) -> float:
@@ -232,7 +261,7 @@ def benchmark_encode(source: Path, settings: EncodeSettings) -> float:
         str(ffmpeg_path()), "-hide_banner", "-loglevel", "error",
         "-ss", "0", "-t", f"{sample_duration:g}", "-i", str(source),
         "-map", "0:v:0", "-vf", vf,
-        *encoder_args(settings), "-b:v", f"{settings.video_mbps:g}M",
+        *encoder_args(settings), *rate_control_args(settings),
         "-an", "-f", "null", "-",
     ]
     started = time.perf_counter()
@@ -370,6 +399,8 @@ def _normalize_clip(
         f"pad={target.width}:{target.height}:(ow-iw)/2:(oh-ih)/2,"
         f"fps={target.fps:g},format=yuv420p",
         "-c:v", codec, "-preset", "fast", "-b:v", f"{video_mbps:g}M",
+        "-maxrate", f"{video_mbps + 2:g}M",
+        "-bufsize", f"{video_mbps * 2:g}M",
     ]
     if target.has_audio:
         audio_signature = target_signature[1] or ()
@@ -690,8 +721,7 @@ def build_command(job: Job) -> tuple[list[str], float]:
         "-filter_complex", ";".join(filters),
         "-map", f"[{current_video}]",
         *encoder_args(enc),
-        "-b:v", f"{enc.video_mbps:g}M", "-maxrate", f"{enc.video_mbps:g}M",
-        "-bufsize", f"{enc.video_mbps * 2:g}M",
+        *rate_control_args(enc),
     ]
     if any_audio:
         audio_map = {"aac": "aac", "mp3": "libmp3lame"}

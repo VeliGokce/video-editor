@@ -73,6 +73,9 @@ def T(tr: str, en: str) -> str:
 EN_TO_TR = {
     "Horizontal": "Yatay", "Vertical": "Dikey",
     "Source Values": "Kaynak Değerleri", "Custom": "Özel",
+    "Bitrate Mode": "Bitrate Modu", "Quality Mode": "Kalite Modu",
+    "Quality Mode (Recommended for 4K)":
+        "Kalite Modu (4K'da tavsiye edilir)",
     **{f"Quick Setting {i}": f"Hızlı Ayar {i}" for i in range(1, 6)},
 }
 PROFILE_EN = {
@@ -82,6 +85,8 @@ PROFILE_EN = {
     "1080p Yüksek": "1080p High",
     "1440p": "1440p",
     "4K": "4K",
+    "4K Web / Chrome": "4K Web / Chrome",
+    "IPTV / YouTube 720p25": "IPTV / YouTube 720p25",
 }
 EN_TO_TR.update({en: tr for tr, en in PROFILE_EN.items()})
 
@@ -368,12 +373,16 @@ class OverlayRows(FileRows):
 class MediaEditorApp(ctk.CTk):
     PROFILES = {
         "Kaynak Değerleri": None,
-        "480p Dengeli": ("h264", "854x480", "30", "1", "aac", "128"),
-        "720p Dengeli": ("h264", "1280x720", "30", "5", "aac", "192"),
-        "1080p Dengeli": ("h264", "1920x1080", "30", "8", "aac", "192"),
-        "1080p Yüksek": ("h264", "1920x1080", "60", "10", "aac", "256"),
-        "1440p": ("h265", "2560x1440", "60", "16", "aac", "256"),
-        "4K": ("h265", "3840x2160", "60", "35", "aac", "320"),
+        "480p Dengeli": ("h264", "854x480", "30", "1", "aac", "128", "bitrate", "23"),
+        "720p Dengeli": ("h264", "1280x720", "30", "5", "aac", "192", "bitrate", "23"),
+        "1080p Dengeli": ("h264", "1920x1080", "30", "8", "aac", "192", "bitrate", "23"),
+        "1080p Yüksek": ("h264", "1920x1080", "60", "10", "aac", "256", "bitrate", "23"),
+        "1440p": ("h265", "2560x1440", "60", "16", "aac", "256", "bitrate", "23"),
+        "4K": ("h265", "3840x2160", "60", "35", "aac", "320", "bitrate", "23"),
+        "4K Web / Chrome": (
+            "h264", "3840x2160", "30", "18", "aac", "192", "quality", "20"),
+        "IPTV / YouTube 720p25": (
+            "h264", "1280x720", "25", "3.5", "aac", "128", "bitrate", "23"),
     }
 
     def __init__(self):
@@ -396,9 +405,13 @@ class MediaEditorApp(ctk.CTk):
         else:
             self.quick_profiles = {"Yatay": saved_profiles, "Dikey": {}}
         self.benchmark_factors = {}
+        self.developer_mode = False
+        self.batch_folder: Path | None = None
+        self.batch_files = []
         self.encoding_dirty = False
         self.cancel_event = threading.Event()
         self.events = queue.Queue()
+        self.batch_decisions = queue.Queue()
         self._build()
         self.bind("<Configure>", self.sync_language_curtain, add="+")
         self.after(100, self._poll)
@@ -504,6 +517,61 @@ class MediaEditorApp(ctk.CTk):
         self.wait_window(window)
         return result["accepted"]
 
+    def batch_error_dialog(self, filename, message):
+        result = {"decision": "cancel"}
+        window = ctk.CTkToplevel(self)
+        window.title(T("Video işlenemedi", "Video could not be processed"))
+        window.geometry("520x270")
+        window.resizable(False, False)
+        window.configure(fg_color=BG)
+        window.transient(self)
+        window.grab_set()
+        window.update_idletasks()
+        window.geometry(
+            f"+{self.winfo_rootx() + (self.winfo_width() - 520) // 2}"
+            f"+{self.winfo_rooty() + (self.winfo_height() - 270) // 2}")
+        card = ctk.CTkFrame(
+            window, fg_color=CARD, corner_radius=16,
+            border_width=1, border_color=BORDER)
+        card.pack(fill="both", expand=True, padx=14, pady=14)
+        ctk.CTkLabel(
+            card, text=filename, text_color=RED, anchor="w",
+            font=ctk.CTkFont(size=16, weight="bold")).pack(
+            fill="x", padx=20, pady=(20, 8))
+        ctk.CTkLabel(
+            card,
+            text=T(
+                "Bu video işlenemedi. Atlayıp sıradaki videodan devam edilsin mi?",
+                "This video could not be processed. Skip it and continue?"),
+            text_color=TEXT, anchor="w", justify="left",
+            wraplength=455).pack(fill="x", padx=20)
+        ctk.CTkLabel(
+            card, text=error_text(message), text_color=SOFT,
+            anchor="w", justify="left", wraplength=455).pack(
+            fill="both", expand=True, padx=20, pady=(8, 12))
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.pack(fill="x", padx=20, pady=(0, 18))
+
+        def close(decision):
+            result["decision"] = decision
+            window.grab_release()
+            window.destroy()
+
+        ctk.CTkButton(
+            actions, text=T("HEPSİNİ İPTAL", "CANCEL ALL"),
+            width=130, fg_color=RED, hover_color="#f06270",
+            text_color="#050810",
+            command=lambda: close("cancel")).pack(side="right")
+        ctk.CTkButton(
+            actions, text=T("ATLA", "SKIP"), width=100,
+            fg_color="#c59432", hover_color="#d7a846",
+            text_color="#050810",
+            command=lambda: close("skip")).pack(side="right", padx=(0, 8))
+        window.protocol("WM_DELETE_WINDOW", lambda: close("cancel"))
+        window.focus_force()
+        self.wait_window(window)
+        return result["decision"]
+
     def _build(self):
         self.build_ambient_background()
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -527,10 +595,17 @@ class MediaEditorApp(ctk.CTk):
         self.language_switch = LanguageToggle(header, self.switch_language)
         self.language_switch.set(CURRENT_LANGUAGE.upper())
         self.language_switch.pack(side="right")
+        self.developer_button = ctk.CTkButton(
+            header, text=T("Toplu", "Batch"), width=104, height=36,
+            fg_color="#111d2d", hover_color="#1c3548",
+            border_width=1, border_color="#35516a", text_color="#d8efed",
+            command=self.start_mode_transition)
+        self.developer_button.pack(side="right", padx=(0, 10))
         source_card = ctk.CTkFrame(
             self, fg_color=CARD, corner_radius=12,
             border_width=1, border_color=BORDER)
         source_card.pack(fill="x", padx=22)
+        self.source_card = source_card
         ctk.CTkButton(source_card, text=T("Asıl Video", "Main Video"),
                       fg_color="#153238", hover_color="#1c454b",
                       text_color="#c7f4ef", border_width=1,
@@ -554,6 +629,7 @@ class MediaEditorApp(ctk.CTk):
             self, fg_color=NAV, corner_radius=12,
             border_width=1, border_color=BORDER)
         nav.pack(fill="x", padx=22, pady=12)
+        self.nav = nav
         self.pages = {}
         self.page_host = ctk.CTkFrame(self, fg_color="transparent")
         self.page_host.pack(fill="both", expand=True, padx=22)
@@ -577,13 +653,16 @@ class MediaEditorApp(ctk.CTk):
         self._build_trim()
         self._build_add()
         self._build_encode()
+        self._build_developer()
         status_line = ctk.CTkFrame(self, fg_color="transparent")
         status_line.pack(fill="x", padx=22)
+        self.status_line = status_line
         self.start_button = ctk.CTkButton(
             status_line, text=T("BAŞLA", "START"), width=110, height=34,
             fg_color=GREEN, hover_color=GREEN_HOVER, text_color="#050810",
             text_color_disabled="#050810",
-            font=ctk.CTkFont(size=13, weight="bold"), command=self.start)
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.start_action)
         self.start_button.pack(side="left", pady=(2, 4))
         self.status = ctk.CTkLabel(
             status_line, text=T("Hazır", "Ready"), text_color=SOFT, anchor="w")
@@ -659,6 +738,8 @@ class MediaEditorApp(ctk.CTk):
         self.translate_widget_tree(self, language)
         self.language_switch.set(language.upper())
         self.output_button.configure(text=self.output_button_text())
+        self.batch_output_button.configure(text=self.output_button_text())
+        self.update_batch_count()
         if self.source is None:
             self.source_label.configure(
                 text=T("Henüz ana video seçilmedi", "No main video selected"))
@@ -792,7 +873,8 @@ class MediaEditorApp(ctk.CTk):
         self.speed_preset.set(preset_display)
         self._set_encoding((
             saved["codec"], saved["resolution"], saved["fps"],
-            saved["bitrate"], saved["audio_codec"], saved["audio_bitrate"]))
+            saved["bitrate"], saved["audio_codec"], saved["audio_bitrate"],
+            saved.get("rate_mode", "bitrate"), saved.get("quality", "23")))
         profile = state["profile"]
         if profile.startswith("Hızlı Ayar"):
             number = profile.rsplit(" ", 1)[-1]
@@ -942,10 +1024,10 @@ class MediaEditorApp(ctk.CTk):
             parent, fg_color=INPUT, corner_radius=9,
             border_width=1, border_color=BORDER)
         row.pack(fill="x", padx=14, pady=4)
-        ctk.CTkLabel(row, text=label, width=180, anchor="w",
+        ctk.CTkLabel(row, text=label, width=135, anchor="w",
                      text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
         combo = ctk.CTkComboBox(
-            row, values=values, width=250, height=30,
+            row, values=values, width=205, height=30,
             fg_color="#101827", border_color=BORDER,
             button_color=CYAN_DARK, button_hover_color=CYAN_HOVER,
                                 command=lambda _x: self.encoding_field_changed())
@@ -1002,6 +1084,13 @@ class MediaEditorApp(ctk.CTk):
             self.show_quick_controls(True)
         self.update_estimate()
 
+    def rate_mode_changed(self, value, mark_dirty=True):
+        mode = canonical(value)
+        self.quality.configure(
+            state="normal" if mode.startswith("Kalite Modu") else "disabled")
+        if mark_dirty:
+            self.encoding_field_changed()
+
     def show_quick_controls(self, visible):
         if visible:
             if not self.quick_slot.winfo_manager():
@@ -1030,23 +1119,50 @@ class MediaEditorApp(ctk.CTk):
         orientation_row.pack(fill="x", padx=14, pady=(0, 4))
         ctk.CTkLabel(
             orientation_row, text=T("Video Yönü", "Video Orientation"),
-            width=180, anchor="w",
+            width=115, anchor="w",
             text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
         self.orientation = ctk.CTkSegmentedButton(
             orientation_row, values=[T("Yatay", "Horizontal"), T("Dikey", "Vertical")],
-            command=self.change_orientation, width=250, height=30,
+            command=self.change_orientation, width=175, height=30,
             selected_color="#174047", selected_hover_color="#1c5055",
             unselected_color="#111d2d", unselected_hover_color="#192b40",
             text_color="#d9f5f1")
         self.orientation.set(T("Yatay", "Horizontal"))
         self.orientation.pack(side="left", padx=(0, 10), pady=6)
+        rate_row = ctk.CTkFrame(
+            self.encode_page, fg_color="#0d1726", corner_radius=9,
+            border_width=1, border_color="#263b4d")
+        rate_row.pack(fill="x", padx=14, pady=4)
+        ctk.CTkLabel(
+            rate_row, text=T("Kontrol", "Control"), width=115, anchor="w",
+            text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
+        self.rate_mode = ctk.CTkComboBox(
+            rate_row,
+            values=[T("Bitrate Modu", "Bitrate Mode"),
+                    T("Kalite Modu (4K'da tavsiye edilir)",
+                      "Quality Mode (Recommended for 4K)")],
+            width=250, height=30, command=self.rate_mode_changed)
+        self.rate_mode.set(T("Bitrate Modu", "Bitrate Mode"))
+        self.rate_mode.pack(side="left", padx=(0, 8), pady=6)
+        ctk.CTkLabel(
+            rate_row,
+            text=T("Kalite", "Quality"),
+            text_color=SOFT).pack(side="left", padx=(8, 6))
+        self.quality = ctk.CTkComboBox(
+            rate_row, values=["18", "20", "23", "26", "28"],
+            width=82, height=30,
+            command=lambda _value: self.encoding_field_changed())
+        self.quality.set("23")
+        self.quality.pack(side="left", padx=(0, 10), pady=6)
+        self.rate_mode_changed(self.rate_mode.get(), mark_dirty=False)
         profile_row = ctk.CTkFrame(
             self.encode_page, fg_color="#0d1726", corner_radius=9,
             border_width=1, border_color="#263b4d")
-        profile_row.pack(fill="x", padx=14, pady=4)
-        ctk.CTkLabel(
-            profile_row, text=T("Hazır profil", "Preset"), width=180, anchor="w",
-            text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
+        profile_row.pack(fill="x", padx=14, pady=4, before=rate_row)
+        self.profile_label = ctk.CTkLabel(
+            profile_row, text=T("Hazır profil", "Preset"), width=115, anchor="w",
+            text_color=SOFT)
+        self.profile_label.pack(side="left", padx=(12, 0), pady=8)
         self.profile = ctk.CTkComboBox(
             profile_row, values=self.profile_names(), width=250, height=30,
             fg_color="#101827", border_color=BORDER,
@@ -1074,14 +1190,16 @@ class MediaEditorApp(ctk.CTk):
         right_settings = ctk.CTkFrame(settings_grid, fg_color="transparent")
         left_settings.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         right_settings.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        self.settings_grid = settings_grid
+        self.left_settings = left_settings
+        self.right_settings = right_settings
         self.processor = self._combo_row(
             left_settings, T("İşleme Birimi", "Processing Unit"),
             [T("CPU (Varsayılan)", "CPU (Default)"),
              T("GPU (Donanım Hızlandırma)", "GPU (Hardware Acceleration)")])
         self.processor.set(T("CPU (Varsayılan)", "CPU (Default)"))
         self.speed_preset = self._combo_row(
-            left_settings, T("Encoding Hızı (Kalite Kaybı)",
-                                "Encoding Speed (Quality Loss)"),
+            left_settings, T("Encoding Hızı", "Encoding Speed"),
             [
                 T("ultrafast — Kayıp riski yüksek", "ultrafast — High loss risk"),
                 T("superfast — Kayıp riski belirgin", "superfast — Noticeable loss risk"),
@@ -1101,7 +1219,9 @@ class MediaEditorApp(ctk.CTk):
         self.fps = self._combo_row(right_settings, "FPS",
                                   ["24", "25", "30", "50", "60"])
         self.bitrate = self._combo_row(right_settings, "Video bitrate (Mbps)",
-                                      ["1", "2", "3", "5", "8", "9", "10", "16", "25", "35"])
+                                      ["0.5", "1", "2", "3", "3.5", "5", "6",
+                                       "8", "9", "10", "16", "18", "25", "35"])
+        self.bitrate.set("3")
         self.audio_codec = self._combo_row(
             right_settings, T("Ses codec", "Audio codec"),
                                            ["aac", "mp3"])
@@ -1114,6 +1234,339 @@ class MediaEditorApp(ctk.CTk):
                    "Estimated output: No main video selected"),
             text_color=GREEN, font=ctk.CTkFont(size=13, weight="bold"))
         self.estimate_label.pack(anchor="w", padx=14, pady=14)
+
+    def _build_developer(self):
+        self.batch_panel = ctk.CTkFrame(
+            self.page_host, width=360, fg_color=CARD, corner_radius=12,
+            border_width=1, border_color=BORDER)
+        self.batch_panel.pack_propagate(False)
+        head = ctk.CTkFrame(self.batch_panel, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(12, 8))
+        ctk.CTkButton(
+            head, text=T("Video Klasörü", "Video Folder"), width=118,
+            fg_color="#153238", hover_color="#1c454b",
+            border_width=1, border_color="#2c6c70",
+            command=self.choose_batch_folder).pack(fill="x")
+        self.batch_folder_label = ctk.CTkLabel(
+            head, text=T("Klasör seçilmedi", "No folder selected"),
+            text_color=SOFT, anchor="w")
+        self.batch_folder_label.pack(fill="x", pady=(5, 7))
+        self.batch_output_button = ctk.CTkButton(
+            head, text=self.output_button_text(), width=150,
+            fg_color="#153238", hover_color="#1c454b",
+            border_width=1, border_color="#2c6c70",
+            command=self.choose_output_dir)
+        self.batch_output_button.pack(fill="x")
+
+        actions = ctk.CTkFrame(self.batch_panel, fg_color="transparent")
+        actions.pack(fill="x", padx=12, pady=(0, 8))
+        ctk.CTkButton(
+            actions, text=T("Tümünü İşaretle", "Select All"), width=112,
+            fg_color="#183b43", hover_color="#21535a",
+            command=lambda: self.set_all_batch_files(True)).pack(side="left")
+        ctk.CTkButton(
+            actions, text=T("Tümünü Kaldır", "Clear All"), width=112,
+            fg_color="#172235", hover_color="#22334b",
+            command=lambda: self.set_all_batch_files(False)).pack(
+            side="left", padx=8)
+        self.batch_count_label = ctk.CTkLabel(
+            actions, text=T("0 video", "0 videos"), text_color=SOFT)
+        self.batch_count_label.pack(side="right")
+        self.batch_list = ctk.CTkScrollableFrame(
+            self.batch_panel, fg_color="#0b1625", corner_radius=10,
+            border_width=1, border_color="#294254")
+        self.batch_list.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        log_head = ctk.CTkFrame(self.batch_panel, fg_color="transparent")
+        log_head.pack(fill="x", padx=12, pady=(0, 5))
+        ctk.CTkLabel(
+            log_head, text=T("ÇIKIŞ LOGU", "OUTPUT LOG"),
+            text_color=TEXT,
+            font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        ctk.CTkButton(
+            log_head, text=T("Kopyala", "Copy"), width=62, height=24,
+            fg_color="#172235", hover_color="#22334b",
+            command=self.copy_batch_log).pack(side="right")
+        ctk.CTkButton(
+            log_head, text=T("Temizle", "Clear"), width=62, height=24,
+            fg_color="#172235", hover_color="#22334b",
+            command=self.clear_batch_log).pack(side="right", padx=5)
+        self.batch_log = ctk.CTkTextbox(
+            self.batch_panel, height=140, fg_color="#08121f",
+            text_color=TEXT, corner_radius=9, border_width=1,
+            border_color="#294254",
+            font=ctk.CTkFont(family=APP_FONT_FAMILY, size=10))
+        self.batch_log.pack(fill="x", padx=12, pady=(0, 12))
+        self.batch_log.configure(state="disabled")
+        self.redraw_batch_files()
+
+    def append_batch_log(self, text):
+        self.batch_log.configure(state="normal")
+        self.batch_log.insert("end", text.rstrip() + "\n")
+        self.batch_log.see("end")
+        self.batch_log.configure(state="disabled")
+
+    def clear_batch_log(self):
+        self.batch_log.configure(state="normal")
+        self.batch_log.delete("1.0", "end")
+        self.batch_log.configure(state="disabled")
+
+    def copy_batch_log(self):
+        text = self.batch_log.get("1.0", "end").strip()
+        if text:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+
+    def toggle_developer_mode(self):
+        self.developer_mode = not self.developer_mode
+        if self.developer_mode:
+            self.last_basic_page = getattr(self, "current_page", "trim")
+            self.source_card.pack_forget()
+            self.nav.pack_forget()
+            for page in (self.trim_page, self.add_page, self.encode_page):
+                page.pack_forget()
+            self.page_host.grid_propagate(False)
+            self.page_host.grid_columnconfigure(0, weight=4, minsize=360)
+            self.page_host.grid_columnconfigure(1, weight=6, minsize=540)
+            self.settings_grid.grid_columnconfigure(
+                0, weight=1, uniform="")
+            self.settings_grid.grid_columnconfigure(1, weight=0, uniform="")
+            self.left_settings.grid(
+                row=0, column=0, sticky="ew", padx=0)
+            self.right_settings.grid(
+                row=1, column=0, sticky="ew", padx=0)
+            self.profile_label.configure(width=92)
+            self.profile.configure(width=215)
+            self.batch_panel.grid(
+                row=0, column=0, sticky="nsew", padx=(0, 6))
+            self.encode_page.grid(
+                row=0, column=1, sticky="nsew", padx=(6, 0))
+            self.page_host.grid_rowconfigure(0, weight=1)
+            self.developer_button.configure(text=T("Tekli", "Single"))
+            self.update_batch_count()
+        else:
+            self.batch_panel.grid_forget()
+            self.encode_page.grid_forget()
+            self.page_host.grid_propagate(True)
+            self.settings_grid.grid_columnconfigure(
+                (0, 1), weight=1, uniform="encoding")
+            self.left_settings.grid(
+                row=0, column=0, sticky="nsew", padx=(0, 4))
+            self.right_settings.grid(
+                row=0, column=1, sticky="nsew", padx=(4, 0))
+            self.profile_label.configure(width=115)
+            self.profile.configure(width=250)
+            self.source_card.pack(
+                fill="x", padx=22, before=self.page_host)
+            self.nav.pack(
+                fill="x", padx=22, pady=12, before=self.page_host)
+            self.developer_button.configure(
+                text=T("Toplu", "Batch"))
+            self.start_button.configure(text=T("BAŞLA", "START"), width=110)
+            getattr(self, f"show_{getattr(self, 'last_basic_page', 'trim')}")()
+
+    def start_mode_transition(self):
+        if getattr(self, "mode_overlay", None):
+            return
+        if hasattr(self, "worker") and self.worker.is_alive():
+            return
+        self.update_idletasks()
+        overlay = ctk.CTkToplevel(self)
+        self.mode_overlay = overlay
+        overlay.withdraw()
+        overlay.overrideredirect(True)
+        overlay.transient(self)
+        overlay.configure(fg_color="#07101b")
+        overlay.wm_geometry(
+            f"{self.winfo_width()}x{self.winfo_height()}+"
+            f"{self.winfo_rootx()}+{self.winfo_rooty()}")
+        overlay.attributes("-alpha", 0.0)
+        accent = ctk.CTkFrame(
+            overlay, width=150, height=3, corner_radius=3,
+            fg_color=CYAN)
+        accent.place(relx=0.5, rely=0.5, anchor="center")
+        overlay.update_idletasks()
+        overlay.deiconify()
+        overlay.lift()
+        self.fade_mode_in(0.0)
+
+    def fade_mode_in(self, opacity):
+        overlay = getattr(self, "mode_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        opacity = min(0.82, opacity + 0.164)
+        overlay.attributes("-alpha", opacity)
+        if opacity >= 0.82:
+            self.toggle_developer_mode()
+            self.update_idletasks()
+            overlay.lift()
+            self.after(35, lambda: self.fade_mode_out(opacity))
+        else:
+            self.after(20, lambda: self.fade_mode_in(opacity))
+
+    def fade_mode_out(self, opacity):
+        overlay = getattr(self, "mode_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        opacity -= 0.105
+        if opacity <= 0:
+            overlay.destroy()
+            self.mode_overlay = None
+            return
+        overlay.attributes("-alpha", opacity)
+        self.after(20, lambda: self.fade_mode_out(opacity))
+
+    def choose_batch_folder(self):
+        selected = filedialog.askdirectory(
+            initialdir=str(self.batch_folder or Path.home()))
+        if not selected:
+            return
+        self.batch_folder = Path(selected)
+        extensions = {".mp4", ".mkv", ".mov", ".avi"}
+        paths = sorted(
+            (path for path in self.batch_folder.iterdir()
+             if path.is_file() and path.suffix.lower() in extensions),
+            key=lambda path: path.name.lower())
+        self.batch_files = [
+            {"path": path, "selected": ctk.BooleanVar(value=True)}
+            for path in paths]
+        self.batch_folder_label.configure(text=self.batch_folder.name)
+        self.redraw_batch_files()
+
+    def redraw_batch_files(self):
+        for child in self.batch_list.winfo_children():
+            child.destroy()
+        if not self.batch_files:
+            ctk.CTkLabel(
+                self.batch_list,
+                text=T("Bu klasörde desteklenen video yok.",
+                       "No supported videos in this folder."),
+                text_color=SOFT).pack(anchor="w", padx=10, pady=10)
+        for row in self.batch_files:
+            ctk.CTkCheckBox(
+                self.batch_list, text=row["path"].name,
+                variable=row["selected"], command=self.update_batch_count,
+                text_color=TEXT).pack(fill="x", padx=10, pady=6)
+        self.update_batch_count()
+
+    def set_all_batch_files(self, selected):
+        for row in self.batch_files:
+            row["selected"].set(selected)
+        self.update_batch_count()
+
+    def update_batch_count(self):
+        count = sum(row["selected"].get() for row in self.batch_files)
+        self.batch_count_label.configure(
+            text=T(f"{count} video seçili", f"{count} videos selected"))
+        if getattr(self, "developer_mode", False):
+            if count <= 1:
+                self.start_button.configure(
+                    text=T("BAŞLAT", "START"), width=110)
+            else:
+                self.start_button.configure(
+                    text=T("TOPLU BAŞLAT", "START BATCH"), width=130)
+
+    def start_action(self):
+        if self.developer_mode:
+            self.start_batch()
+        else:
+            self.start()
+
+    def start_batch(self):
+        if hasattr(self, "worker") and self.worker.is_alive():
+            return
+        selected = [
+            row["path"] for row in self.batch_files if row["selected"].get()]
+        if not selected:
+            self.dialog(
+                T("Video seçilmedi", "No video selected"),
+                T("Encoding için en az bir video seçin.",
+                  "Select at least one video to encode."))
+            return
+        try:
+            settings = self.settings()
+            jobs = [
+                Job(
+                    source=path,
+                    output=self.output_dir / f"Edit_{path.stem}.mp4",
+                    encode=settings, force_encode=True)
+                for path in selected
+            ]
+            existing = [job.output.name for job in jobs if job.output.exists()]
+            if existing:
+                raise MontageError(T(
+                    "Çıkış klasöründe aynı adlı dosya zaten var:\n",
+                    "A file with the same name already exists in the output folder:\n"
+                ) + "\n".join(existing[:8]))
+            for job in jobs:
+                validate(job)
+        except MontageError as exc:
+            self.dialog(
+                T("Toplu işlem başlatılamadı", "Batch could not start"),
+                error_text(str(exc)))
+            return
+        self.cancel_event.clear()
+        self.start_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.language_switch.configure(state="disabled")
+        self.progress.set(0)
+        self.status.configure(
+            text=T("Toplu encoding başladı…", "Batch encoding started…"),
+            text_color=TEXT)
+        self.clear_batch_log()
+        self.append_batch_log(T(
+            f"Toplu işlem başladı • {len(jobs)} video",
+            f"Batch started • {len(jobs)} videos"))
+        self.worker = threading.Thread(
+            target=self._batch_worker, args=(jobs,), daemon=True)
+        self.worker.start()
+
+    def _batch_worker(self, jobs):
+        created = []
+        skipped = []
+        try:
+            total = len(jobs)
+            for index, job in enumerate(jobs):
+                self.events.put(("batch_log", T(
+                    f"Başlatıldı: {job.source.name}",
+                    f"Started: {job.source.name}")))
+                try:
+                    render(
+                        job,
+                        lambda value, i=index, p=job.source: self.events.put(
+                            ("batch_progress", (i, total, p.name, value))),
+                        self.cancel_event.is_set)
+                    created.append(job.output)
+                    self.events.put(("batch_log", T(
+                        f"Tamamlandı: {job.output.name}",
+                        f"Completed: {job.output.name}")))
+                except Exception as exc:
+                    try:
+                        job.output.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    if self.cancel_event.is_set():
+                        raise
+                    self.events.put(
+                        ("batch_item_error", (job.source.name, str(exc))))
+                    decision = self.batch_decisions.get()
+                    if decision == "skip":
+                        skipped.append(job.source.name)
+                        self.events.put(("batch_log", T(
+                            f"Atlandı: {job.source.name}",
+                            f"Skipped: {job.source.name}")))
+                        continue
+                    raise MontageError(T(
+                        "Toplu işlem kullanıcı tarafından tamamen iptal edildi.",
+                        "The batch was cancelled completely by the user."))
+            self.events.put(("batch_done", {
+                "created": created, "skipped": skipped}))
+        except Exception as exc:
+            for path in created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self.events.put(("batch_aborted", str(exc)))
 
     def choose_source(self):
         path = filedialog.askopenfilename(filetypes=[("MP4 videolar", "*.mp4")])
@@ -1186,6 +1639,7 @@ class MediaEditorApp(ctk.CTk):
             self.output_dir = Path(selected)
             save_output_dir(self.output_dir)
             self.output_button.configure(text=self.output_button_text())
+            self.batch_output_button.configure(text=self.output_button_text())
 
     def output_button_text(self):
         name = self.output_dir.name or str(self.output_dir)
@@ -1203,7 +1657,7 @@ class MediaEditorApp(ctk.CTk):
             "h265" if "265" in self.info.video_codec or "hevc" in self.info.video_codec else "h264",
             f"{self.info.width}x{self.info.height}", f"{self.info.fps:g}",
             f"{max(0.1, bitrate):g}", self.info.audio_codec if self.info.audio_codec in ("aac", "mp3") else "aac",
-            str(audio),
+            str(audio), "bitrate", "23",
         )
         self._set_encoding(values)
         self.profile.set(T("Kaynak Değerleri", "Source Values"))
@@ -1221,6 +1675,10 @@ class MediaEditorApp(ctk.CTk):
             "bitrate": self.bitrate.get(),
             "audio_codec": self.audio_codec.get(),
             "audio_bitrate": self.audio_bitrate.get(),
+            "rate_mode": (
+                "quality" if canonical(self.rate_mode.get()).startswith("Kalite Modu")
+                else "bitrate"),
+            "quality": self.quality.get(),
         }
 
     def update_quick_slot_color(self):
@@ -1304,9 +1762,11 @@ class MediaEditorApp(ctk.CTk):
             self.speed_preset.set(preset_display)
             self._set_encoding((
                 saved["codec"], saved["resolution"], saved["fps"],
-                saved["bitrate"], saved["audio_codec"], saved["audio_bitrate"]))
-            slot_number = name.rsplit(" ", 1)[-1]
-            self.profile.set(T(name, f"Quick Setting {slot_number}"))
+                saved["bitrate"], saved["audio_codec"], saved["audio_bitrate"],
+                saved.get("rate_mode", "bitrate"), saved.get("quality", "23")))
+            self.profile.set(
+                T(name, f"Quick Setting {name.rsplit(' ', 1)[-1]}")
+                if name.startswith("Hızlı Ayar ") else name)
             self.show_quick_controls(False)
             self.encoding_dirty = True
             return
@@ -1327,6 +1787,15 @@ class MediaEditorApp(ctk.CTk):
                 (self.codec, self.resolution, self.fps, self.bitrate,
                  self.audio_codec, self.audio_bitrate), values):
             widget.set(str(value))
+        if len(values) >= 8:
+            mode = values[6]
+            self.rate_mode.set(T(
+                "Kalite Modu (4K'da tavsiye edilir)"
+                if mode == "quality" else "Bitrate Modu",
+                "Quality Mode (Recommended for 4K)"
+                if mode == "quality" else "Bitrate Mode"))
+            self.rate_mode_changed(self.rate_mode.get(), mark_dirty=False)
+            self.quality.set(str(values[7]))
         self.update_estimate()
 
     def settings(self):
@@ -1337,7 +1806,12 @@ class MediaEditorApp(ctk.CTk):
                 float(self.bitrate.get()), self.audio_codec.get(),
                 int(self.audio_bitrate.get()),
                 device="gpu" if self.processor.get().startswith("GPU") else "cpu",
-                preset=self.speed_preset.get().split(" ", 1)[0])
+                preset=self.speed_preset.get().split(" ", 1)[0],
+                rate_mode=(
+                    "quality"
+                    if canonical(self.rate_mode.get()).startswith("Kalite Modu")
+                    else "bitrate"),
+                quality=int(self.quality.get()))
         except ValueError as exc:
             raise MontageError("Encoding alanlarından biri geçersiz.") from exc
 
@@ -1378,9 +1852,13 @@ class MediaEditorApp(ctk.CTk):
                 else estimated_process_seconds(duration, settings)
             )
             calibrated = "ölçümlü" if factor is not None else "ilk tahmin"
+            size_title = T(
+                "Tahmini üst sınır", "Estimated upper limit"
+            ) if settings.rate_mode == "quality" else T(
+                "Tahmini çıktı", "Estimated output")
             self.estimate_label.configure(
                 text=(
-                    f"{T('Tahmini çıktı', 'Estimated output')}: ≈ {human_size(estimate)}  •  "
+                    f"{size_title}: ≈ {human_size(estimate)}  •  "
                     f"{T('Çıktı süresi', 'Output duration')}: {format_time(duration)}  •  "
                     f"{T('Tahmini işlem süresi', 'Estimated processing time')}: "
                     f"≈ {format_time(process_seconds)} "
@@ -1394,10 +1872,27 @@ class MediaEditorApp(ctk.CTk):
     @staticmethod
     def benchmark_key(settings):
         return (settings.device, settings.codec, settings.width,
-                settings.height, settings.fps, settings.preset)
+                settings.height, settings.fps, settings.preset,
+                settings.rate_mode, settings.quality)
 
     def measure_pc(self):
-        if not self.source:
+        if self.developer_mode:
+            selected = [
+                row["path"] for row in self.batch_files
+                if row["selected"].get()]
+            if not selected:
+                self.dialog(
+                    T("PC gücü ölçülemedi",
+                      "PC performance could not be measured"),
+                    T("Önce en az bir video seçin.",
+                      "Select at least one video first."))
+                return
+            samples = [selected[index % len(selected)]
+                       for index in range(3)]
+            samples = samples[:3]
+        elif self.source:
+            samples = [self.source] * 3
+        else:
             self.dialog(
                 T("PC gücü ölçülemedi", "PC performance could not be measured"),
                 T("Önce ana MP4 dosyasını seçin.", "Select the main MP4 file first."))
@@ -1415,13 +1910,14 @@ class MediaEditorApp(ctk.CTk):
             text=T("3 test yapılıyor: 0/3", "Running 3 tests: 0/3"),
             text_color=SOFT)
         threading.Thread(
-            target=self._benchmark_worker, args=(settings,), daemon=True).start()
+            target=self._benchmark_worker,
+            args=(settings, samples), daemon=True).start()
 
-    def _benchmark_worker(self, settings):
+    def _benchmark_worker(self, settings, samples):
         try:
             factors = []
-            for run_number in range(1, 4):
-                factors.append(benchmark_encode(self.source, settings))
+            for run_number, source in enumerate(samples, start=1):
+                factors.append(benchmark_encode(source, settings))
                 self.events.put(("benchmark_progress", run_number))
             factor = sum(factors) / len(factors)
             self.events.put(("benchmark_done", (settings, factor)))
@@ -1481,6 +1977,64 @@ class MediaEditorApp(ctk.CTk):
                     self.progress.set(value)
                     self.status.configure(
                         text=f"{T('İşleniyor', 'Processing')}… %{value * 100:.1f}")
+                elif kind == "batch_progress":
+                    index, total, name, progress = value
+                    overall = (index + progress) / total
+                    self.progress.set(overall)
+                    self.status.configure(
+                        text=(
+                            f"{T('Toplu encoding', 'Batch encoding')} "
+                            f"{index + 1}/{total} • {name} • %{progress * 100:.1f}"
+                        ))
+                elif kind == "batch_log":
+                    self.append_batch_log(value)
+                elif kind == "batch_item_error":
+                    filename, message = value
+                    self.append_batch_log(T(
+                        f"HATA: {filename}",
+                        f"ERROR: {filename}"))
+                    decision = self.batch_error_dialog(filename, message)
+                    self.batch_decisions.put(decision)
+                elif kind == "batch_aborted":
+                    self.start_button.configure(state="normal")
+                    self.cancel_button.configure(state="disabled")
+                    self.language_switch.configure(state="normal")
+                    self.progress.set(0)
+                    self.status.configure(
+                        text=T(
+                            "Toplu işlem iptal edildi; üretilen çıktılar silindi.",
+                            "Batch cancelled; generated outputs were deleted."),
+                        text_color=RED)
+                    self.append_batch_log(T(
+                        "İptal edildi • Bu batch'in çıktıları temizlendi.",
+                        "Cancelled • Outputs from this batch were cleaned."))
+                elif kind == "batch_done":
+                    created = value["created"]
+                    skipped = value["skipped"]
+                    self.start_button.configure(state="normal")
+                    self.cancel_button.configure(state="disabled")
+                    self.language_switch.configure(state="normal")
+                    self.progress.set(1)
+                    self.status.configure(
+                        text=T(
+                            f"Tamamlandı: {len(created)} video"
+                            f" • Atlandı: {len(skipped)}",
+                            f"Completed: {len(created)} videos"
+                            f" • Skipped: {len(skipped)}"),
+                        text_color=GREEN)
+                    self.append_batch_log(T(
+                        f"Bitti • {len(created)} tamamlandı"
+                        f" • {len(skipped)} atlandı",
+                        f"Finished • {len(created)} completed"
+                        f" • {len(skipped)} skipped"))
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                    self.dialog(
+                        T("Toplu encoding tamamlandı",
+                          "Batch encoding completed"),
+                        T(f"{len(created)} video oluşturuldu."
+                          f"\n{len(skipped)} video atlandı.",
+                          f"{len(created)} videos were created."
+                          f"\n{len(skipped)} videos were skipped."))
                 elif kind == "done":
                     self.start_button.configure(state="normal")
                     self.cancel_button.configure(state="disabled")
