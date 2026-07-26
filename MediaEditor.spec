@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 
 binaries = [('ffmpeg.exe', '.')]
+if Path('ffprobe.exe').exists():
+    binaries.append(('ffprobe.exe', '.'))
 
 for dll_dir in (Path(sys.prefix) / 'Library' / 'bin', Path(sys.prefix) / 'DLLs'):
     for dll_name in ('tcl86t.dll', 'tk86t.dll'):

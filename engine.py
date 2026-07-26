@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +56,7 @@ class Job:
     inserts: list[tuple[float, Path]] = field(default_factory=list)
     overlays: list[tuple[float, float, Path]] = field(default_factory=list)
     encode: EncodeSettings | None = None
+    force_encode: bool = False
 
 
 def app_file(name: str) -> Path:
@@ -70,6 +73,14 @@ def ffmpeg_path() -> Path:
         return Path(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as exc:
         raise MontageError("FFmpeg bulunamadı. Uygulama eksik veya bozuk kurulmuş.") from exc
+
+
+def ffprobe_path() -> Path | None:
+    bundled = app_file("ffprobe.exe")
+    if bundled.exists():
+        return bundled
+    system_probe = shutil.which("ffprobe")
+    return Path(system_probe) if system_probe else None
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -266,6 +277,317 @@ def _split_ranges(ranges: list[tuple[float, float]], points: list[float]) -> lis
     return result
 
 
+def stream_signature(path: Path) -> tuple:
+    probe_exe = ffprobe_path()
+    if probe_exe is None:
+        raise MontageError("Kesin akış doğrulaması için ffprobe bulunamadı.")
+    proc = _run([
+        str(probe_exe), "-v", "error", "-show_data_hash", "sha256",
+        "-show_entries",
+        "stream=index,codec_type,codec_name,profile,width,height,pix_fmt,"
+        "field_order,r_frame_rate,time_base,color_range,color_space,"
+        "color_transfer,color_primaries,sample_fmt,sample_rate,channels,"
+        "channel_layout,extradata_hash",
+        "-of", "json", str(path),
+    ])
+    if proc.returncode:
+        raise MontageError(f"Geçerli bir video okunamadı:\n{path.name}")
+    try:
+        streams = json.loads(proc.stdout)["streams"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MontageError(f"Akış bilgileri okunamadı:\n{path.name}") from exc
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if video is None:
+        raise MontageError(f"Geçerli bir video okunamadı:\n{path.name}")
+    video_keys = (
+        "codec_name", "profile", "width", "height", "pix_fmt", "field_order",
+        "r_frame_rate", "time_base", "color_range", "color_space",
+        "color_transfer", "color_primaries", "extradata_hash",
+    )
+    audio_keys = (
+        "codec_name", "profile", "sample_fmt", "sample_rate", "channels",
+        "channel_layout", "time_base", "extradata_hash",
+    )
+    return (
+        tuple(video.get(key) for key in video_keys),
+        tuple(audio.get(key) for key in audio_keys) if audio else None,
+    )
+
+
+def frame_at(
+        path: Path, timestamp: float, media_info: MediaInfo | None = None
+        ) -> tuple[bool, bool]:
+    probe_exe = ffprobe_path()
+    if probe_exe is None:
+        return False, False
+    info = media_info or probe(path)
+    tolerance = max(0.001, 0.5 / max(info.fps, 1.0))
+    window_start = max(0.0, timestamp - 2.0)
+    window_end = min(info.duration, timestamp + 2.0)
+    try:
+        proc = _run([
+            str(probe_exe), "-v", "error", "-select_streams", "v:0",
+            "-read_intervals", f"{window_start:.6f}%{window_end:.6f}",
+            "-show_entries", "frame=best_effort_timestamp_time,key_frame",
+            "-of", "csv=p=0", str(path),
+        ])
+    except OSError:
+        return False, False
+    if proc.returncode:
+        return False, False
+    for line in proc.stdout.splitlines():
+        match = re.match(r"\s*([01]),([\d.]+)", line)
+        if not match:
+            continue
+        key_frame = match[1] == "1"
+        frame_time = float(match[2])
+        if abs(frame_time - timestamp) <= tolerance:
+            return True, key_frame
+    return False, False
+
+
+def is_keyframe(path: Path, timestamp: float) -> bool:
+    return frame_at(path, timestamp)[1]
+
+
+def _run_checked(args: list[str], message: str) -> None:
+    proc = _run(args)
+    if proc.returncode:
+        tail = "\n".join(proc.stderr.strip().splitlines()[-10:])
+        raise MontageError(message + "\n\n" + tail)
+
+
+def _normalize_clip(
+        source: Path, output: Path, target: MediaInfo, target_signature: tuple) -> None:
+    codec = "libx265" if target.video_codec.lower() in ("hevc", "h265") else "libx264"
+    video_mbps = max(1.0, target.video_bitrate / 1_000_000) if target.video_bitrate else 8.0
+    args = [
+        str(ffmpeg_path()), "-hide_banner", "-y", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf",
+        f"scale={target.width}:{target.height}:force_original_aspect_ratio=decrease,"
+        f"pad={target.width}:{target.height}:(ow-iw)/2:(oh-ih)/2,"
+        f"fps={target.fps:g},format=yuv420p",
+        "-c:v", codec, "-preset", "fast", "-b:v", f"{video_mbps:g}M",
+    ]
+    if target.has_audio:
+        audio_signature = target_signature[1] or ()
+        sample_rate = audio_signature[3] if len(audio_signature) > 3 else 48000
+        layout = audio_signature[5] if len(audio_signature) > 5 else "stereo"
+        channels = 1 if "mono" in layout else 2
+        audio_encoder = (
+            "libmp3lame" if target.audio_codec.lower() in ("mp3", "mp3float")
+            else "aac")
+        args += [
+            "-c:a", audio_encoder, "-b:a",
+            f"{max(96, target.audio_bitrate // 1000) if target.audio_bitrate else 192}k",
+            "-ar", str(sample_rate), "-ac", str(channels),
+        ]
+    else:
+        args += ["-an"]
+    args += ["-movflags", "+faststart", str(output)]
+    _run_checked(args, f"“{source.name}” ana videoya uyarlanamadı.")
+
+
+def _copy_segment(source: Path, output: Path, start: float, end: float) -> None:
+    args = [str(ffmpeg_path()), "-hide_banner", "-y"]
+    if start > 0:
+        args += ["-ss", f"{start:.6f}"]
+    args += ["-i", str(source)]
+    if end > start:
+        args += ["-t", f"{end - start:.6f}"]
+    args += ["-map", "0", "-c", "copy", str(output)]
+    _run_checked(args, f"“{source.name}” kayıpsız kesilemedi.")
+
+
+def _validate_smart_output(
+        output: Path, expected_duration: float, joins: list[float],
+        source_signature: tuple, fps: float) -> bool:
+    probe_exe = ffprobe_path()
+    if probe_exe is None:
+        return False
+    try:
+        probe(output)
+        if stream_signature(output) != source_signature:
+            return False
+    except MontageError:
+        return False
+    duration_proc = _run([
+        str(probe_exe), "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=duration", "-of",
+        "default=noprint_wrappers=1:nokey=1", str(output),
+    ])
+    try:
+        video_duration = float(duration_proc.stdout.strip())
+    except ValueError:
+        return False
+    tolerance = 0.5 / max(fps, 1.0) + 0.001
+    if abs(video_duration - expected_duration) > tolerance:
+        return False
+    for join_time in joins:
+        proc = _run([
+            str(ffmpeg_path()), "-v", "error",
+            "-ss", f"{max(0.0, join_time - 0.25):.6f}",
+            "-t", "0.5", "-i", str(output), "-map", "0:v:0",
+            "-map", "0:a:0?", "-f", "null", "-",
+        ])
+        if proc.returncode or proc.stderr.strip():
+            return False
+    return True
+
+
+def _smart_timeline(job: Job, info: MediaInfo) -> tuple[list[tuple[Path, float, float]], list[Path]]:
+    inserts = sorted(job.inserts, key=lambda item: item[0])
+    ranges = _split_ranges(_source_ranges(job, info), [position for position, _ in inserts])
+    timeline: list[tuple[Path, float, float]] = []
+    additions: list[Path] = []
+    for path in job.prepend:
+        duration = probe(path).duration
+        timeline.append((path, 0.0, duration))
+        additions.append(path)
+    by_time: dict[float, list[Path]] = {}
+    for position, path in inserts:
+        by_time.setdefault(position, []).append(path)
+    emitted: set[float] = set()
+    first = ranges[0][0]
+    for path in by_time.get(first, []):
+        duration = probe(path).duration
+        timeline.append((path, 0.0, duration))
+        additions.append(path)
+    if first in by_time:
+        emitted.add(first)
+    for start, end in ranges:
+        if start in by_time and start not in emitted:
+            for path in by_time[start]:
+                duration = probe(path).duration
+                timeline.append((path, 0.0, duration))
+                additions.append(path)
+            emitted.add(start)
+        timeline.append((job.source, start, end))
+        if end in by_time and end not in emitted:
+            for path in by_time[end]:
+                duration = probe(path).duration
+                timeline.append((path, 0.0, duration))
+                additions.append(path)
+            emitted.add(end)
+    for path in job.append:
+        duration = probe(path).duration
+        timeline.append((path, 0.0, duration))
+        additions.append(path)
+    return timeline, additions
+
+
+def can_smart_render(job: Job, info: MediaInfo) -> bool:
+    if job.force_encode or job.overlays:
+        return False
+    timeline, _ = _smart_timeline(job, info)
+    frame_cache: dict[tuple[Path, float], tuple[bool, bool]] = {}
+    info_cache: dict[Path, MediaInfo] = {job.source: info}
+    for path, start, end in timeline:
+        if path not in info_cache:
+            info_cache[path] = probe(path)
+        path_info = info_cache[path]
+        start_key = (path, start)
+        if start_key not in frame_cache:
+            frame_cache[start_key] = frame_at(path, start, path_info)
+        start_result = frame_cache[start_key]
+        if not start_result[1]:
+            return False
+        if end < path_info.duration - (0.5 / max(path_info.fps, 1.0)):
+            end_key = (path, end)
+            if end_key not in frame_cache:
+                frame_cache[end_key] = frame_at(path, end, path_info)
+            end_result = frame_cache[end_key]
+            if not end_result[0]:
+                return False
+    return True
+
+
+def smart_render(job: Job, progress=None, cancel=None) -> None:
+    info, _ = validate(job)
+    if not can_smart_render(job, info):
+        _render_full(job, progress, cancel)
+        return
+    has_edits = bool(
+        job.cut_start or job.cut_end or job.cut_middle or job.prepend
+        or job.append or job.inserts)
+    if not has_edits:
+        if cancel and cancel():
+            raise MontageError("İşlem kullanıcı tarafından iptal edildi.")
+        shutil.copy2(job.source, job.output)
+        if progress:
+            progress(1.0)
+        return
+
+    timeline, additions = _smart_timeline(job, info)
+    source_signature = stream_signature(job.source)
+    piece_durations = [end - start for _, start, end in timeline]
+    expected_duration = sum(piece_durations)
+    joins: list[float] = []
+    running_duration = 0.0
+    for duration in piece_durations[:-1]:
+        running_duration += duration
+        joins.append(running_duration)
+    token = uuid.uuid4().hex
+    temp_dir = job.output.parent
+    temporary_files: list[Path] = []
+    try:
+        normalized: dict[Path, Path] = {}
+        for number, path in enumerate(dict.fromkeys(additions)):
+            if stream_signature(path) == source_signature:
+                normalized[path] = path
+            else:
+                converted = temp_dir / f".media_editor_{token}_normalized_{number}.mp4"
+                temporary_files.append(converted)
+                _normalize_clip(path, converted, info, source_signature)
+                if stream_signature(converted) != source_signature:
+                    _render_full(job, progress, cancel)
+                    return
+                normalized[path] = converted
+        pieces: list[Path] = []
+        for index, (path, start, end) in enumerate(timeline):
+            if cancel and cancel():
+                raise MontageError("İşlem kullanıcı tarafından iptal edildi.")
+            actual = normalized.get(path, path)
+            piece = temp_dir / f".media_editor_{token}_piece_{index:04d}.mp4"
+            temporary_files.append(piece)
+            _copy_segment(actual, piece, start if actual == path else 0.0,
+                          end if actual == path else probe(actual).duration)
+            pieces.append(piece)
+            if progress:
+                progress(min(0.85, (index + 1) / max(1, len(timeline)) * 0.85))
+        concat_file = temp_dir / f".media_editor_{token}_concat.txt"
+        temporary_files.append(concat_file)
+        concat_file.write_text(
+            "\n".join("file '" + str(path).replace("'", "'\\''") + "'" for path in pieces),
+            encoding="utf-8")
+        _run_checked([
+            str(ffmpeg_path()), "-hide_banner", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_file), "-map", "0", "-c", "copy",
+            "-movflags", "+faststart", str(job.output),
+        ], "Videolar kayıpsız birleştirilemedi.")
+    finally:
+        for temporary_file in temporary_files:
+            try:
+                temporary_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+    if not job.output.is_file() or job.output.stat().st_size == 0:
+        _render_full(job, progress, cancel)
+        return
+    if not _validate_smart_output(
+            job.output, expected_duration, joins, source_signature, info.fps):
+        try:
+            job.output.unlink()
+        except OSError:
+            pass
+        _render_full(job, progress, cancel)
+        return
+    if progress:
+        progress(1.0)
+
+
 def build_command(job: Job) -> tuple[list[str], float]:
     info, total = validate(job)
     enc = job.encode
@@ -318,6 +640,11 @@ def build_command(job: Job) -> tuple[list[str], float]:
 
     filters: list[str] = []
     concat_labels: list[str] = []
+    input_infos = {
+        index: probe(path) for index, path in enumerate(inputs)
+        if index not in image_indices
+    }
+    any_audio = any(item.has_audio for item in input_infos.values())
     for n, (idx, a, b) in enumerate(pieces):
         trim = "" if a is None else f"trim=start={a:.6f}:end={b:.6f},"
         atrim = "" if a is None else f"atrim=start={a:.6f}:end={b:.6f},"
@@ -326,11 +653,25 @@ def build_command(job: Job) -> tuple[list[str], float]:
             f"scale={enc.width}:{enc.height}:force_original_aspect_ratio=decrease,"
             f"pad={enc.width}:{enc.height}:(ow-iw)/2:(oh-ih)/2,"
             f"fps={enc.fps:g},format=yuv420p[v{n}]")
-        filters.append(
-            f"[{idx}:a]{atrim}asetpts=PTS-STARTPTS,aresample=48000,"
-            f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
-        concat_labels.append(f"[v{n}][a{n}]")
-    filters.append("".join(concat_labels) + f"concat=n={len(pieces)}:v=1:a=1[cv][ca]")
+        if any_audio:
+            if input_infos[idx].has_audio:
+                filters.append(
+                    f"[{idx}:a]{atrim}asetpts=PTS-STARTPTS,aresample=48000,"
+                    f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
+            else:
+                piece_duration = (
+                    b - a if a is not None and b is not None
+                    else input_infos[idx].duration)
+                filters.append(
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={piece_duration:.6f},"
+                    f"asetpts=PTS-STARTPTS[a{n}]")
+            concat_labels.append(f"[v{n}][a{n}]")
+        else:
+            concat_labels.append(f"[v{n}]")
+    filters.append(
+        "".join(concat_labels)
+        + f"concat=n={len(pieces)}:v=1:a={1 if any_audio else 0}"
+        + ("[cv][ca]" if any_audio else "[cv]"))
     current_video = "cv"
     mapped_overlays = [
         (_map_source_time(job, info, start), duration, path)
@@ -345,21 +686,28 @@ def build_command(job: Job) -> tuple[list[str], float]:
             f"enable='between(t,{start:.6f},{start + duration:.6f})'[{out}]")
         current_video = out
 
-    audio_map = {"aac": "aac", "mp3": "libmp3lame"}
     cmd += [
         "-filter_complex", ";".join(filters),
-        "-map", f"[{current_video}]", "-map", "[ca]",
+        "-map", f"[{current_video}]",
         *encoder_args(enc),
         "-b:v", f"{enc.video_mbps:g}M", "-maxrate", f"{enc.video_mbps:g}M",
         "-bufsize", f"{enc.video_mbps * 2:g}M",
-        "-c:a", audio_map.get(enc.audio_codec.lower(), enc.audio_codec),
-        "-b:a", f"{enc.audio_kbps}k", "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats", str(job.output),
+    ]
+    if any_audio:
+        audio_map = {"aac": "aac", "mp3": "libmp3lame"}
+        cmd += [
+            "-map", "[ca]",
+            "-c:a", audio_map.get(enc.audio_codec.lower(), enc.audio_codec),
+            "-b:a", f"{enc.audio_kbps}k",
+        ]
+    cmd += [
+        "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+        str(job.output),
     ]
     return cmd, total
 
 
-def render(job: Job, progress=None, cancel=None) -> None:
+def _render_full(job: Job, progress=None, cancel=None) -> None:
     cmd, total = build_command(job)
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -403,6 +751,21 @@ def render(job: Job, progress=None, cancel=None) -> None:
             except OSError:
                 pass
         raise
+
+
+def render(job: Job, progress=None, cancel=None) -> None:
+    validate(job)
+    try:
+        smart_render(job, progress, cancel)
+    except MontageError as smart_error:
+        if job.output.exists():
+            try:
+                job.output.unlink()
+            except OSError:
+                pass
+        if "iptal edildi" in str(smart_error).lower() or (cancel and cancel()):
+            raise
+        _render_full(job, progress, cancel)
 
 
 def job_debug(job: Job) -> str:

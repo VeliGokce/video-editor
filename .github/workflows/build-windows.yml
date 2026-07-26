@@ -45,6 +45,11 @@ jobs:
           import shutil
           shutil.copy2(imageio_ffmpeg.get_ffmpeg_exe(), "ffmpeg.exe")
 
+      - name: Disable unsupported ffprobe on Windows 7
+        if: matrix.target == 'Win7'
+        shell: pwsh
+        run: Remove-Item -LiteralPath ffprobe.exe -Force -ErrorAction SilentlyContinue
+
       - name: Build EXE
         run: python -m PyInstaller --clean --noconfirm MediaEditor.spec
 

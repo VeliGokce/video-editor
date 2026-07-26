@@ -9,6 +9,8 @@ MP4 videolar için özelleştirilmiş, Türkçe ve İngilizce Windows video edit
 - CPU ve GPU hızlandırma
 - Kalıcı hızlı ayarlar
 - İşlem öncesi doğrulama ve güvenli iptal
+- FFprobe ile kesin ana-kare doğrulaması
+- Güvenli koşullarda kayıpsız kırpma/birleştirme, diğer her durumda full encoding
 
 ## GitHub üzerinden EXE oluşturma
 

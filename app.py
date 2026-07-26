@@ -302,6 +302,7 @@ class MediaEditorApp(ctk.CTk):
         else:
             self.quick_profiles = {"Yatay": saved_profiles, "Dikey": {}}
         self.benchmark_factors = {}
+        self.encoding_dirty = False
         self.cancel_event = threading.Event()
         self.events = queue.Queue()
         self._build()
@@ -471,6 +472,10 @@ class MediaEditorApp(ctk.CTk):
         combo = ctk.CTkComboBox(row, values=values, width=220,
                                 command=lambda _x: self.encoding_field_changed())
         combo.pack(side="left")
+        if hasattr(combo, "_entry"):
+            combo._entry.bind(
+                "<KeyRelease>", lambda _event: self.encoding_field_changed(),
+                add="+")
         return combo
 
     def profile_names(self):
@@ -493,6 +498,7 @@ class MediaEditorApp(ctk.CTk):
         return self.quick_profiles.setdefault(orientation, {})
 
     def encoding_field_changed(self):
+        self.encoding_dirty = True
         if hasattr(self, "profile"):
             self.profile.set(T("Özel", "Custom"))
             self.show_quick_controls(True)
@@ -665,6 +671,9 @@ class MediaEditorApp(ctk.CTk):
     def apply_source_profile(self):
         if not self.info:
             return
+        self.processor.set(T("CPU (Varsayılan)", "CPU (Default)"))
+        self.speed_preset.set(T(
+            "fast — Kayıp riski çok düşük", "fast — Very low loss risk"))
         bitrate = self.info.video_bitrate / 1_000_000 if self.info.video_bitrate else 8
         audio = self.info.audio_bitrate // 1000 if self.info.audio_bitrate else 192
         values = (
@@ -676,6 +685,7 @@ class MediaEditorApp(ctk.CTk):
         self._set_encoding(values)
         self.profile.set(T("Kaynak Değerleri", "Source Values"))
         self.show_quick_controls(False)
+        self.encoding_dirty = False
 
     def current_profile_data(self):
         return {
@@ -721,6 +731,7 @@ class MediaEditorApp(ctk.CTk):
     def apply_profile(self, name):
         name = canonical(name)
         if name == "Özel":
+            self.encoding_dirty = True
             self.show_quick_controls(True)
             return
         profiles = self.orientation_profiles()
@@ -751,6 +762,7 @@ class MediaEditorApp(ctk.CTk):
             slot_number = name.rsplit(" ", 1)[-1]
             self.profile.set(T(name, f"Quick Setting {slot_number}"))
             self.show_quick_controls(False)
+            self.encoding_dirty = True
             return
         self.show_quick_controls(False)
         values = self.PROFILES[name]
@@ -762,6 +774,7 @@ class MediaEditorApp(ctk.CTk):
                 width, height = adjusted[1].split("x")
                 adjusted[1] = f"{height}x{width}"
             self._set_encoding(adjusted)
+            self.encoding_dirty = True
 
     def _set_encoding(self, values):
         for widget, value in zip(
@@ -802,6 +815,7 @@ class MediaEditorApp(ctk.CTk):
             inserts=self.insert_rows.timed_paths(),
             overlays=self.overlay_rows.overlays(),
             encode=self.settings(),
+            force_encode=self.encoding_dirty,
         )
 
     def update_estimate(self):
