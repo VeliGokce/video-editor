@@ -4,10 +4,14 @@ import json
 import os
 import queue
 import threading
+import time
+import tkinter as tk
+import winsound
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
+from PIL import Image, ImageDraw, ImageFilter
 
 import font_loader
 from engine import (
@@ -15,22 +19,54 @@ from engine import (
     format_time, parse_time, probe, render, validate,
 )
 
-BG = "#0d1117"
-CARD = "#161b22"
-INPUT = "#21262d"
-TEXT = "#f0f6fc"
-SOFT = "#8b949e"
-GREEN = "#238636"
-GREEN_HOVER = "#2ea043"
-BLUE = "#1f6feb"
-RED = "#da3633"
+BG = "#070b14"
+CARD = "#111827"
+INPUT = "#182131"
+NAV = "#0d1422"
+BORDER = "#2a3549"
+TEXT = "#f4f7fb"
+SOFT = "#a9c9c8"
+CYAN = "#20d4c5"
+CYAN_HOVER = "#19b9ad"
+CYAN_DARK = "#153d42"
+GREEN = "#22a866"
+GREEN_HOVER = "#2bc77a"
+BLUE = CYAN
+RED = "#e05262"
 
 APP_FONT_FAMILY = font_loader.load_bundled_fonts()
 ctk.ThemeManager.theme["CTkFont"]["family"] = APP_FONT_FAMILY
+ctk.ThemeManager.theme["CTkFont"]["weight"] = "bold"
+ctk.ThemeManager.theme["CTkEntry"].update({
+    "fg_color": "#0b1625",
+    "border_color": "#294254",
+    "text_color": "#f4f7fb",
+    "placeholder_text_color": "#7fa8aa",
+})
+ctk.ThemeManager.theme["CTkComboBox"].update({
+    "fg_color": "#0b1625",
+    "border_color": "#294254",
+    "button_color": "#173b43",
+    "button_hover_color": "#21535a",
+    "text_color": "#f4f7fb",
+    "text_color_disabled": "#9bb8b9",
+})
+ctk.ThemeManager.theme["CTkSegmentedButton"].update({
+    "fg_color": "#0b1625",
+    "selected_color": "#174047",
+    "selected_hover_color": "#1c5055",
+    "unselected_color": "#111d2d",
+    "unselected_hover_color": "#192b40",
+    "text_color": "#e5f5f3",
+    "text_color_disabled": "#9bb8b9",
+})
 CURRENT_LANGUAGE = "tr"
+LANGUAGE_PAIRS = {}
 
 
 def T(tr: str, en: str) -> str:
+    LANGUAGE_PAIRS[tr] = (tr, en)
+    LANGUAGE_PAIRS[en] = (tr, en)
     return en if CURRENT_LANGUAGE == "en" else tr
 
 
@@ -142,6 +178,57 @@ def human_size(value: int) -> str:
     return ""
 
 
+class LanguageToggle(ctk.CTkFrame):
+    def __init__(self, master, command):
+        super().__init__(
+            master, width=112, height=38, corner_radius=11,
+            fg_color="#0a101c", border_width=1, border_color="#33425a")
+        self.command = command
+        self.value = "TR"
+        self.buttons = {}
+        self.pack_propagate(False)
+        for language in ("TR", "EN"):
+            button = ctk.CTkButton(
+                self, text=language, width=49, height=30, corner_radius=8,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda item=language: self.select(item))
+            button.pack(side="left", padx=(4, 0), pady=4)
+            self.buttons[language] = button
+        self._paint()
+
+    def _paint(self):
+        for language, button in self.buttons.items():
+            selected = language == self.value
+            button.configure(
+                fg_color=CYAN_DARK if selected else "transparent",
+                hover_color="#1b5054" if selected else "#172235",
+                text_color=CYAN if selected else SOFT,
+                border_width=1 if selected else 0,
+                border_color=CYAN if selected else "#0a101c")
+
+    def select(self, value):
+        if value == self.value:
+            return
+        self.value = value
+        self._paint()
+        self.command(value)
+
+    def set(self, value):
+        self.value = value.upper()
+        self._paint()
+
+    def get(self):
+        return self.value
+
+    def configure(self, **kwargs):
+        state = kwargs.pop("state", None)
+        if state is not None and hasattr(self, "buttons"):
+            for button in self.buttons.values():
+                button.configure(state=state)
+        if kwargs:
+            return super().configure(**kwargs)
+
+
 def estimated_process_seconds(duration: float, settings: EncodeSettings) -> float:
     """Veryfast CPU encoding için temkinli bir ilk tahmin.
 
@@ -173,8 +260,11 @@ class FileRows(ctk.CTkFrame):
         ctk.CTkLabel(head, text=title, text_color=TEXT,
                      font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
         ctk.CTkButton(head, text=T("+ Ekle", "+ Add"), width=72, height=28, fg_color=BLUE,
+                      hover_color=CYAN_HOVER, corner_radius=8,
                       command=self.add).pack(side="right")
-        self.body = ctk.CTkFrame(self, fg_color=INPUT, corner_radius=8)
+        self.body = ctk.CTkFrame(
+            self, fg_color=INPUT, corner_radius=10,
+            border_width=1, border_color=BORDER)
         self.body.pack(fill="x", pady=(6, 12))
         self.redraw()
 
@@ -193,7 +283,7 @@ class FileRows(ctk.CTkFrame):
                 anchor="w", padx=10, pady=10)
             return
         for i, row in enumerate(self.rows):
-            line = ctk.CTkFrame(self.body, fg_color="transparent")
+            line = ctk.CTkFrame(self.body, fg_color="#151e2d", corner_radius=7)
             line.pack(fill="x", padx=6, pady=4)
             if self.timed:
                 entry = ctk.CTkEntry(line, width=92)
@@ -208,7 +298,8 @@ class FileRows(ctk.CTkFrame):
                 ("×", lambda n=i: self.remove(n)),
             ):
                 ctk.CTkButton(line, text=text, width=28, height=26,
-                              fg_color=RED if text == "×" else INPUT,
+                              fg_color=RED if text == "×" else "#273247",
+                              hover_color="#f06474" if text == "×" else "#344158",
                               command=action).pack(side="left", padx=2)
 
     def move(self, index, direction):
@@ -251,7 +342,7 @@ class OverlayRows(FileRows):
                 anchor="w", padx=10, pady=10)
             return
         for i, row in enumerate(self.rows):
-            line = ctk.CTkFrame(self.body, fg_color="transparent")
+            line = ctk.CTkFrame(self.body, fg_color="#151e2d", corner_radius=7)
             line.pack(fill="x", padx=6, pady=4)
             for key, label_text in (
                     ("time", T("Ekrana geleceği zaman:", "Display time:")),
@@ -290,6 +381,9 @@ class MediaEditorApp(ctk.CTk):
         CURRENT_LANGUAGE = load_app_settings().get("language", "tr")
         super().__init__()
         self.title("Media Editor")
+        icon_path = Path(__file__).resolve().parent / "assets" / "media-editor.ico"
+        if icon_path.exists():
+            self.iconbitmap(str(icon_path))
         self.geometry("1120x760")
         self.minsize(980, 680)
         self.configure(fg_color=BG)
@@ -306,24 +400,147 @@ class MediaEditorApp(ctk.CTk):
         self.cancel_event = threading.Event()
         self.events = queue.Queue()
         self._build()
+        self.bind("<Configure>", self.sync_language_curtain, add="+")
         self.after(100, self._poll)
 
+    def sync_language_curtain(self, event=None):
+        overlay = getattr(self, "language_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        if event is not None and event.widget is not self:
+            return
+        if self.state() == "iconic":
+            overlay.withdraw()
+            return
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty()
+        overlay.wm_geometry(f"{width}x{height}+{x}+{y}")
+        overlay.deiconify()
+        overlay.lift()
+
+    def build_ambient_background(self):
+        width, height = 1120, 760
+        image = Image.new("RGBA", (width, height), "#070b14")
+        draw = ImageDraw.Draw(image)
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            color = (
+                int(8 + 3 * ratio),
+                int(14 + 5 * ratio),
+                int(25 + 9 * ratio),
+                255,
+            )
+            draw.line((0, y, width, y), fill=color)
+        glow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        glow_draw.ellipse((-230, -250, 480, 390), fill=(20, 211, 194, 78))
+        glow_draw.ellipse((760, -280, 1340, 320), fill=(117, 75, 190, 66))
+        glow_draw.ellipse((360, 610, 850, 960), fill=(25, 91, 160, 34))
+        glow = glow.filter(ImageFilter.GaussianBlur(115))
+        image = Image.alpha_composite(image, glow)
+        line_draw = ImageDraw.Draw(image)
+        for x in range(-height, width, 90):
+            line_draw.line((x, height, x + height, 0), fill=(88, 115, 145, 10), width=1)
+        self.ambient_image = ctk.CTkImage(
+            light_image=image, dark_image=image, size=(width, height))
+        background = ctk.CTkLabel(self, image=self.ambient_image, text="")
+        background.place(x=0, y=0, relwidth=1, relheight=1)
+        background.lower()
+
+    def dialog(self, title, message, question=False):
+        result = {"accepted": False}
+        window = ctk.CTkToplevel(self)
+        window.title(title)
+        window.geometry("440x220")
+        window.resizable(False, False)
+        window.configure(fg_color=BG)
+        window.transient(self)
+        window.grab_set()
+        window.update_idletasks()
+        window.geometry(
+            f"+{self.winfo_rootx() + (self.winfo_width() - 440) // 2}"
+            f"+{self.winfo_rooty() + (self.winfo_height() - 220) // 2}")
+        card = ctk.CTkFrame(
+            window, fg_color=CARD, corner_radius=16,
+            border_width=1, border_color=BORDER)
+        card.pack(fill="both", expand=True, padx=14, pady=14)
+        ctk.CTkLabel(
+            card, text=title, text_color=TEXT, anchor="w",
+            font=ctk.CTkFont(size=17, weight="bold")).pack(
+            fill="x", padx=20, pady=(20, 8))
+        ctk.CTkLabel(
+            card, text=message, text_color=SOFT, anchor="w",
+            justify="left", wraplength=370).pack(
+            fill="both", expand=True, padx=20, pady=(0, 12))
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.pack(fill="x", padx=20, pady=(0, 18))
+
+        def close(accepted=False):
+            result["accepted"] = accepted
+            window.grab_release()
+            window.destroy()
+
+        if question:
+            ctk.CTkButton(
+                actions, text=T("Hayır", "No"), width=90, height=34,
+                fg_color=INPUT, hover_color="#26354c",
+                border_width=1, border_color=BORDER,
+                command=lambda: close(False)).pack(side="right")
+            ctk.CTkButton(
+                actions, text=T("Evet", "Yes"), width=90, height=34,
+                fg_color=CYAN_DARK, hover_color="#1b5054",
+                text_color=CYAN, border_width=1, border_color=CYAN,
+                command=lambda: close(True)).pack(side="right", padx=(0, 8))
+        else:
+            ctk.CTkButton(
+                actions, text=T("Tamam", "OK"), width=96, height=34,
+                fg_color=CYAN_DARK, hover_color="#1b5054",
+                text_color=CYAN, border_width=1, border_color=CYAN,
+                command=lambda: close(True)).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        window.focus_force()
+        self.wait_window(window)
+        return result["accepted"]
+
     def _build(self):
+        self.build_ambient_background()
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=22, pady=(18, 12))
-        ctk.CTkLabel(header, text="MEDIA EDITOR", text_color=TEXT,
-                     font=ctk.CTkFont(size=24, weight="bold")).pack(
-            side="left", fill="x", expand=True)
-        self.language_switch = ctk.CTkSegmentedButton(
-            header, values=["TR", "EN"], width=94, command=self.switch_language)
+        brand_mark = ctk.CTkFrame(
+            header, width=42, height=42, corner_radius=12,
+            fg_color=CYAN_DARK, border_width=1, border_color=CYAN)
+        brand_mark.pack(side="left")
+        brand_mark.pack_propagate(False)
+        icon_path = Path(__file__).resolve().parent / "assets" / "media-editor.ico"
+        self.header_icon = ctk.CTkImage(
+            light_image=Image.open(icon_path),
+            dark_image=Image.open(icon_path), size=(30, 30))
+        ctk.CTkLabel(
+            brand_mark, image=self.header_icon, text="").pack(expand=True)
+        brand_copy = ctk.CTkFrame(header, fg_color="transparent")
+        brand_copy.pack(side="left", padx=12, fill="x", expand=True)
+        ctk.CTkLabel(
+            brand_copy, text="MEDIA EDITOR", text_color=TEXT, anchor="w",
+            font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
+        self.language_switch = LanguageToggle(header, self.switch_language)
         self.language_switch.set(CURRENT_LANGUAGE.upper())
         self.language_switch.pack(side="right")
-        source_card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12)
+        source_card = ctk.CTkFrame(
+            self, fg_color=CARD, corner_radius=12,
+            border_width=1, border_color=BORDER)
         source_card.pack(fill="x", padx=22)
-        ctk.CTkButton(source_card, text=T("Asıl Video", "Main Video"), fg_color=BLUE,
+        ctk.CTkButton(source_card, text=T("Asıl Video", "Main Video"),
+                      fg_color="#153238", hover_color="#1c454b",
+                      text_color="#c7f4ef", border_width=1,
+                      border_color="#2c6c70", corner_radius=8,
                       command=self.choose_source).pack(side="left", padx=12, pady=12)
         self.output_button = ctk.CTkButton(
-            source_card, text=self.output_button_text(), fg_color=BLUE,
+            source_card, text=self.output_button_text(),
+            fg_color="#153238", hover_color="#1c454b",
+            text_color="#c7f4ef", border_width=1,
+            border_color="#2c6c70", corner_radius=8,
             command=self.choose_output_dir)
         self.output_button.pack(side="right", padx=12, pady=12)
         self.info_label = ctk.CTkLabel(source_card, text="", text_color=SOFT)
@@ -333,7 +550,9 @@ class MediaEditorApp(ctk.CTk):
             text_color=SOFT, anchor="w")
         self.source_label.pack(side="left", fill="x", expand=True)
 
-        nav = ctk.CTkFrame(self, fg_color=INPUT, corner_radius=10)
+        nav = ctk.CTkFrame(
+            self, fg_color=NAV, corner_radius=12,
+            border_width=1, border_color=BORDER)
         nav.pack(fill="x", padx=22, pady=12)
         self.pages = {}
         self.page_host = ctk.CTkFrame(self, fg_color="transparent")
@@ -344,9 +563,9 @@ class MediaEditorApp(ctk.CTk):
                 ("add", T("Ekleme", "Add"), self.show_add),
                 ("encode", "Encoding", self.show_encode)):
             button = ctk.CTkButton(
-                nav, text=name, fg_color=CARD, hover_color=BLUE,
+                nav, text=name, fg_color=INPUT, hover_color="#223148",
                 height=40,
-                border_width=1, border_color="#30363d",
+                border_width=1, border_color=BORDER, text_color=SOFT,
                 font=ctk.CTkFont(
                     family=APP_FONT_FAMILY, size=16, weight="bold"),
                 command=method)
@@ -362,7 +581,9 @@ class MediaEditorApp(ctk.CTk):
         status_line.pack(fill="x", padx=22)
         self.start_button = ctk.CTkButton(
             status_line, text=T("BAŞLA", "START"), width=110, height=34,
-            fg_color=GREEN, hover_color=GREEN_HOVER, command=self.start)
+            fg_color=GREEN, hover_color=GREEN_HOVER, text_color="#050810",
+            text_color_disabled="#050810",
+            font=ctk.CTkFont(size=13, weight="bold"), command=self.start)
         self.start_button.pack(side="left", pady=(2, 4))
         self.status = ctk.CTkLabel(
             status_line, text=T("Hazır", "Ready"), text_color=SOFT, anchor="w")
@@ -370,34 +591,284 @@ class MediaEditorApp(ctk.CTk):
         self.cancel_button = ctk.CTkButton(
             status_line, text=T("İPTAL", "CANCEL"), width=90, height=30,
             fg_color=RED, hover_color="#f85149",
+            text_color="#050810",
+            text_color_disabled="#050810",
+            font=ctk.CTkFont(size=12, weight="bold"),
             state="disabled", command=self.cancel_render)
         self.cancel_button.pack(side="right", pady=(2, 4))
         self.progress = ctk.CTkProgressBar(self, progress_color=GREEN)
+        self.progress.configure(fg_color="#1a2536", corner_radius=8, height=8)
         self.progress.set(0)
         self.progress.pack(fill="x", padx=22, pady=(4, 16))
         self.show_trim()
 
     def _page(self):
-        outer = ctk.CTkScrollableFrame(self.page_host, fg_color=CARD, corner_radius=12)
+        outer = ctk.CTkScrollableFrame(
+            self.page_host, fg_color=CARD, corner_radius=12,
+            border_width=1, border_color=BORDER,
+            scrollbar_button_color="#2a374c",
+            scrollbar_button_hover_color=CYAN_DARK)
         return outer
 
     def switch_language(self, value):
         language = value.lower()
         if language == CURRENT_LANGUAGE:
             return
+        if hasattr(self, "worker") and self.worker.is_alive():
+            return
+        state = self.capture_ui_state()
         data = load_app_settings()
         data["language"] = language
         save_app_settings(data)
-        self.destroy()
-        MediaEditorApp().mainloop()
+        self.show_language_curtain(language)
+        self.after(120, lambda: self.apply_language(language, state))
+
+    @staticmethod
+    def translated_value(value, language):
+        pair = LANGUAGE_PAIRS.get(value)
+        if not pair:
+            return value
+        return pair[1] if language == "en" else pair[0]
+
+    def translate_widget_tree(self, widget, language):
+        try:
+            text = widget.cget("text")
+            translated = self.translated_value(text, language)
+            if translated != text:
+                widget.configure(text=translated)
+        except Exception:
+            pass
+        try:
+            values = widget.cget("values")
+            current = widget.get()
+            translated_values = [
+                self.translated_value(item, language) for item in values]
+            translated_current = self.translated_value(current, language)
+            if list(values) != translated_values:
+                widget.configure(values=translated_values)
+            if translated_current != current:
+                widget.set(translated_current)
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self.translate_widget_tree(child, language)
+
+    def apply_language(self, language, state):
+        global CURRENT_LANGUAGE
+        CURRENT_LANGUAGE = language
+        self.translate_widget_tree(self, language)
+        self.language_switch.set(language.upper())
+        self.output_button.configure(text=self.output_button_text())
+        if self.source is None:
+            self.source_label.configure(
+                text=T("Henüz ana video seçilmedi", "No main video selected"))
+        self.profile.configure(values=self.profile_names())
+        self.update_quick_slot_color()
+        self.update_estimate()
+        elapsed_ms = int(
+            (time.monotonic() - self.language_transition_started) * 1000)
+        self.after(
+            max(0, 850 - elapsed_ms),
+            lambda: self.finish_language_curtain(language))
+
+    def show_language_curtain(self, language):
+        self.update_idletasks()
+        self.language_transition_started = time.monotonic()
+        curtain = ctk.CTkToplevel(self)
+        self.language_overlay = curtain
+        curtain.withdraw()
+        curtain.overrideredirect(True)
+        curtain.transient(self)
+        curtain.configure(fg_color="#050810")
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty()
+        curtain.wm_geometry(f"{width}x{height}+{x}+{y}")
+        panel = ctk.CTkFrame(
+            curtain, width=330, height=170, corner_radius=18,
+            fg_color="#0d1523", border_width=1, border_color="#33425a")
+        panel.place(relx=0.5, rely=0.5, anchor="center")
+        panel.pack_propagate(False)
+        self.language_spinner = tk.Canvas(
+            panel, width=42, height=42, bg="#0d1523",
+            highlightthickness=0, bd=0)
+        self.language_spinner.pack(pady=(24, 4))
+        self.language_spinner.create_oval(
+            6, 6, 36, 36, outline="#223247", width=4)
+        self.language_spinner_arc = self.language_spinner.create_arc(
+            6, 6, 36, 36, start=90, extent=105, style="arc",
+            outline=CYAN, width=4)
+        self.language_loading_label = ctk.CTkLabel(
+            panel,
+            text="Dil değiştiriliyor…" if language == "tr"
+            else "Switching language…",
+            text_color=TEXT, font=ctk.CTkFont(size=13, weight="bold"))
+        self.language_loading_label.pack(pady=(0, 14))
+        self.language_progress = ctk.CTkProgressBar(
+            panel, width=238, height=7, corner_radius=6,
+            fg_color="#1a2638", progress_color=CYAN, mode="indeterminate")
+        self.language_progress.pack()
+        self.language_progress.start()
+        curtain.update_idletasks()
+        curtain.deiconify()
+        curtain.lift()
+        self.language_spinner_frame = 0
+        self.animate_language_spinner()
+
+    def animate_language_spinner(self):
+        overlay = getattr(self, "language_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        self.language_spinner.itemconfigure(
+            self.language_spinner_arc, start=self.language_spinner_frame)
+        self.language_spinner_frame = (
+            self.language_spinner_frame - 36) % 360
+        self.language_spinner_after = self.after(
+            18, self.animate_language_spinner)
+
+    def capture_ui_state(self):
+        def entry_value(widget):
+            return widget.get()
+
+        return {
+            "page": getattr(self, "current_page", "trim"),
+            "trim": (
+                self.cut_start_on.get(), entry_value(self.cut_start),
+                self.cut_middle_on.get(), entry_value(self.cut_middle_a),
+                entry_value(self.cut_middle_b),
+                self.cut_end_on.get(), entry_value(self.cut_end)),
+            "prepend": [dict(row) for row in self.prepend_rows.rows],
+            "insert": [dict(row) for row in self.insert_rows.rows],
+            "append": [dict(row) for row in self.append_rows.rows],
+            "overlay": [dict(row) for row in self.overlay_rows.rows],
+            "encoding": self.current_profile_data(),
+            "profile": canonical(self.profile.get()),
+            "encoding_dirty": self.encoding_dirty,
+        }
+
+    @staticmethod
+    def set_entry(widget, value):
+        widget.delete(0, "end")
+        widget.insert(0, value)
+
+    def rebuild_language(self, language, state):
+        global CURRENT_LANGUAGE
+        CURRENT_LANGUAGE = language
+        for child in self.winfo_children():
+            if child is not getattr(self, "language_overlay", None):
+                child.destroy()
+        self._build()
+        if self.info and self.source:
+            self.source_label.configure(text=self.source.name, text_color=TEXT)
+            self.info_label.configure(
+                text=f"{format_time(self.info.duration)}  •  "
+                     f"{self.info.width}×{self.info.height}  •  {self.info.fps:g} FPS")
+        trim = state["trim"]
+        self.cut_start_on.set(trim[0])
+        self.set_entry(self.cut_start, trim[1])
+        self.cut_middle_on.set(trim[2])
+        self.set_entry(self.cut_middle_a, trim[3])
+        self.set_entry(self.cut_middle_b, trim[4])
+        self.cut_end_on.set(trim[5])
+        self.set_entry(self.cut_end, trim[6])
+        for widget, key in (
+                (self.prepend_rows, "prepend"), (self.insert_rows, "insert"),
+                (self.append_rows, "append"), (self.overlay_rows, "overlay")):
+            widget.rows = state[key]
+            widget.redraw()
+        saved = state["encoding"]
+        orientation = saved["orientation"]
+        self.orientation.set(T(
+            orientation, "Vertical" if orientation == "Dikey" else "Horizontal"))
+        self.change_orientation(orientation)
+        self.processor.set(
+            T("GPU (Donanım Hızlandırma)", "GPU (Hardware Acceleration)")
+            if saved["processor"] == "gpu"
+            else T("CPU (Varsayılan)", "CPU (Default)"))
+        preset_display = next(
+            (option for option in self.speed_preset.cget("values")
+             if option.startswith(saved["preset"] + " ")), saved["preset"])
+        self.speed_preset.set(preset_display)
+        self._set_encoding((
+            saved["codec"], saved["resolution"], saved["fps"],
+            saved["bitrate"], saved["audio_codec"], saved["audio_bitrate"]))
+        profile = state["profile"]
+        if profile.startswith("Hızlı Ayar"):
+            number = profile.rsplit(" ", 1)[-1]
+            self.profile.set(T(profile, f"Quick Setting {number}"))
+        elif profile in PROFILE_EN:
+            self.profile.set(T(profile, PROFILE_EN[profile]))
+        else:
+            self.profile.set(T(
+                profile,
+                "Source Values" if profile == "Kaynak Değerleri" else "Custom"))
+        self.encoding_dirty = state["encoding_dirty"]
+        self.show_quick_controls(profile == "Özel")
+        getattr(self, f"show_{state['page']}")()
+        overlay = getattr(self, "language_overlay", None)
+        if overlay and overlay.winfo_exists():
+            overlay.lift()
+        self.update_idletasks()
+        if overlay and overlay.winfo_exists():
+            elapsed_ms = int(
+                (time.monotonic() - self.language_transition_started) * 1000)
+            remaining_ms = max(0, 5000 - elapsed_ms)
+            self.after(remaining_ms, lambda: self.finish_language_curtain(language))
+
+    def finish_language_curtain(self, language):
+        overlay = getattr(self, "language_overlay", None)
+        if overlay and overlay.winfo_exists():
+            self.language_progress.stop()
+            self.language_progress.configure(mode="determinate")
+            self.language_progress.set(1)
+            self.language_loading_label.configure(
+                text="Hazır" if language == "tr" else "Ready")
+            self.after(60, lambda: self.fade_language_curtain(1.0))
+
+    def fade_language_curtain(self, opacity):
+        overlay = getattr(self, "language_overlay", None)
+        if not overlay or not overlay.winfo_exists():
+            return
+        opacity -= 0.075
+        if opacity <= 0:
+            self.close_language_curtain()
+            return
+        overlay.attributes("-alpha", opacity)
+        self.language_fade_after = self.after(
+            20, lambda: self.fade_language_curtain(opacity))
+
+    def close_language_curtain(self):
+        fade_after = getattr(self, "language_fade_after", None)
+        if fade_after:
+            try:
+                self.after_cancel(fade_after)
+            except Exception:
+                pass
+            self.language_fade_after = None
+        spinner_after = getattr(self, "language_spinner_after", None)
+        if spinner_after:
+            try:
+                self.after_cancel(spinner_after)
+            except Exception:
+                pass
+            self.language_spinner_after = None
+        overlay = getattr(self, "language_overlay", None)
+        if overlay and overlay.winfo_exists():
+            overlay.destroy()
+        self.language_overlay = None
 
     def _show(self, page, selected):
+        self.current_page = selected
         for item in (self.trim_page, self.add_page, self.encode_page):
             item.pack_forget()
         for key, button in self.nav_buttons.items():
             button.configure(
-                fg_color=BLUE if key == selected else CARD,
-                border_color="#58a6ff" if key == selected else "#30363d")
+                fg_color=CYAN_DARK if key == selected else INPUT,
+                hover_color="#1b4d52" if key == selected else "#223148",
+                text_color=CYAN if key == selected else SOFT,
+                border_color=CYAN if key == selected else BORDER,
+                border_width=2 if key == selected else 1)
         page.pack(fill="both", expand=True)
 
     def show_trim(self): self._show(self.trim_page, "trim")
@@ -405,7 +876,9 @@ class MediaEditorApp(ctk.CTk):
     def show_encode(self): self._show(self.encode_page, "encode")
 
     def _time_option(self, parent, text, two=False):
-        row = ctk.CTkFrame(parent, fg_color=INPUT, corner_radius=8)
+        row = ctk.CTkFrame(
+            parent, fg_color=INPUT, corner_radius=10,
+            border_width=1, border_color=BORDER)
         row.pack(fill="x", padx=14, pady=7)
         enabled = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(row, text=text, variable=enabled).pack(
@@ -465,13 +938,18 @@ class MediaEditorApp(ctk.CTk):
             text_color=SOFT).pack(anchor="w", padx=14, pady=(0, 12))
 
     def _combo_row(self, parent, label, values):
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=5)
+        row = ctk.CTkFrame(
+            parent, fg_color=INPUT, corner_radius=9,
+            border_width=1, border_color=BORDER)
+        row.pack(fill="x", padx=14, pady=4)
         ctk.CTkLabel(row, text=label, width=180, anchor="w",
-                     text_color=SOFT).pack(side="left")
-        combo = ctk.CTkComboBox(row, values=values, width=220,
+                     text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
+        combo = ctk.CTkComboBox(
+            row, values=values, width=250, height=30,
+            fg_color="#101827", border_color=BORDER,
+            button_color=CYAN_DARK, button_hover_color=CYAN_HOVER,
                                 command=lambda _x: self.encoding_field_changed())
-        combo.pack(side="left")
+        combo.pack(side="left", padx=(0, 10), pady=6)
         if hasattr(combo, "_entry"):
             combo._entry.bind(
                 "<KeyRelease>", lambda _event: self.encoding_field_changed(),
@@ -481,8 +959,9 @@ class MediaEditorApp(ctk.CTk):
     def profile_names(self):
         profiles = self.orientation_profiles()
         saved = [
-            T(f"Hızlı Ayar {i}", f"Quick Setting {i}") for i in range(1, 6)
-            if f"Hızlı Ayar {i}" in profiles
+            T(name, f"Quick Setting {name.rsplit(' ', 1)[-1]}")
+            if name.startswith("Hızlı Ayar ") else name
+            for name in profiles
         ]
         built_in = [
             T(name, PROFILE_EN[name]) for name in self.PROFILES
@@ -491,6 +970,25 @@ class MediaEditorApp(ctk.CTk):
         return [
             *saved, T("Kaynak Değerleri", "Source Values"),
             T("Özel", "Custom"), *built_in]
+
+    def quick_slot_names(self):
+        profiles = self.orientation_profiles()
+        names = [
+            T(name, f"Quick Setting {name.rsplit(' ', 1)[-1]}")
+            if name.startswith("Hızlı Ayar ") else name
+            for name in profiles
+        ]
+        number = 1
+        while len(names) < 5:
+            default_name = f"Hızlı Ayar {number}"
+            if default_name not in profiles:
+                names.append(T(default_name, f"Quick Setting {number}"))
+            number += 1
+        return names[:5]
+
+    def select_quick_slot(self, value):
+        self.active_quick_slot = canonical(value)
+        self.update_quick_slot_color()
 
     def orientation_profiles(self):
         orientation = (
@@ -520,48 +1018,69 @@ class MediaEditorApp(ctk.CTk):
                      font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
         self.pc_button = ctk.CTkButton(
             encode_head, text=T("PC Gücünü Ölç", "Measure PC Performance"), fg_color=BLUE,
+            hover_color=CYAN_HOVER, corner_radius=8,
             command=self.measure_pc)
         self.pc_button.pack(side="right")
         self.pc_result = ctk.CTkLabel(
             encode_head, text=T("Ölçülmedi", "Not measured"), text_color=SOFT)
         self.pc_result.pack(side="right", padx=10)
-        orientation_row = ctk.CTkFrame(self.encode_page, fg_color="transparent")
-        orientation_row.pack(fill="x", padx=14, pady=(0, 8))
+        orientation_row = ctk.CTkFrame(
+            self.encode_page, fg_color="#0d1726", corner_radius=9,
+            border_width=1, border_color="#263b4d")
+        orientation_row.pack(fill="x", padx=14, pady=(0, 4))
         ctk.CTkLabel(
             orientation_row, text=T("Video Yönü", "Video Orientation"),
             width=180, anchor="w",
-            text_color=SOFT).pack(side="left")
+            text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
         self.orientation = ctk.CTkSegmentedButton(
             orientation_row, values=[T("Yatay", "Horizontal"), T("Dikey", "Vertical")],
-            command=self.change_orientation, width=220)
+            command=self.change_orientation, width=250, height=30,
+            selected_color="#174047", selected_hover_color="#1c5055",
+            unselected_color="#111d2d", unselected_hover_color="#192b40",
+            text_color="#d9f5f1")
         self.orientation.set(T("Yatay", "Horizontal"))
-        self.orientation.pack(side="left")
-        profile_row = ctk.CTkFrame(self.encode_page, fg_color="transparent")
-        profile_row.pack(fill="x", padx=14, pady=5)
+        self.orientation.pack(side="left", padx=(0, 10), pady=6)
+        profile_row = ctk.CTkFrame(
+            self.encode_page, fg_color="#0d1726", corner_radius=9,
+            border_width=1, border_color="#263b4d")
+        profile_row.pack(fill="x", padx=14, pady=4)
         ctk.CTkLabel(
             profile_row, text=T("Hazır profil", "Preset"), width=180, anchor="w",
-            text_color=SOFT).pack(side="left")
+            text_color=SOFT).pack(side="left", padx=(12, 0), pady=8)
         self.profile = ctk.CTkComboBox(
-            profile_row, values=self.profile_names(), width=220,
+            profile_row, values=self.profile_names(), width=250, height=30,
+            fg_color="#101827", border_color=BORDER,
+            button_color=CYAN_DARK, button_hover_color=CYAN_HOVER,
             command=self.apply_profile)
         self.profile.set(T("Kaynak Değerleri", "Source Values"))
-        self.profile.pack(side="left")
+        self.profile.pack(side="left", padx=(0, 10), pady=6)
         self.quick_slot = ctk.CTkComboBox(
-            profile_row, values=[
-                T(f"Hızlı Ayar {i}", f"Quick Setting {i}") for i in range(1, 6)],
-            width=130, command=lambda _value: self.update_quick_slot_color())
-        self.quick_slot.set(T("Hızlı Ayar 1", "Quick Setting 1"))
+            profile_row, values=self.quick_slot_names(),
+            width=130, fg_color="#111d2d", border_color="#294254",
+            button_color="#183b43", button_hover_color="#21535a",
+            command=self.select_quick_slot)
+        self.quick_slot.set(self.quick_slot_names()[0])
+        self.active_quick_slot = canonical(self.quick_slot.get())
         self.update_quick_slot_color()
         self.save_quick_button = ctk.CTkButton(
             profile_row, text=T("Kaydet", "Save"), width=72,
+            fg_color="#183b43", hover_color="#21535a",
+            text_color="#c7f4ef", border_width=1, border_color="#2c6c70",
             command=self.save_quick_profile)
+        settings_grid = ctk.CTkFrame(self.encode_page, fg_color="transparent")
+        settings_grid.pack(fill="x", padx=10, pady=(2, 8))
+        settings_grid.grid_columnconfigure((0, 1), weight=1, uniform="encoding")
+        left_settings = ctk.CTkFrame(settings_grid, fg_color="transparent")
+        right_settings = ctk.CTkFrame(settings_grid, fg_color="transparent")
+        left_settings.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        right_settings.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
         self.processor = self._combo_row(
-            self.encode_page, T("İşleme Birimi", "Processing Unit"),
+            left_settings, T("İşleme Birimi", "Processing Unit"),
             [T("CPU (Varsayılan)", "CPU (Default)"),
              T("GPU (Donanım Hızlandırma)", "GPU (Hardware Acceleration)")])
         self.processor.set(T("CPU (Varsayılan)", "CPU (Default)"))
         self.speed_preset = self._combo_row(
-            self.encode_page, T("Encoding Hızı (Kalite Kaybı)",
+            left_settings, T("Encoding Hızı (Kalite Kaybı)",
                                 "Encoding Speed (Quality Loss)"),
             [
                 T("ultrafast — Kayıp riski yüksek", "ultrafast — High loss risk"),
@@ -574,20 +1093,20 @@ class MediaEditorApp(ctk.CTk):
             ])
         self.speed_preset.set(T("fast — Kayıp riski çok düşük",
                                 "fast — Very low loss risk"))
-        self.codec = self._combo_row(self.encode_page, T("Video codec", "Video codec"),
+        self.codec = self._combo_row(left_settings, T("Video codec", "Video codec"),
                                      ["h264", "h265"])
         self.resolution = self._combo_row(
-            self.encode_page, T("Çözünürlük", "Resolution"),
+            left_settings, T("Çözünürlük", "Resolution"),
             self.resolution_values(T("Yatay", "Horizontal")))
-        self.fps = self._combo_row(self.encode_page, "FPS",
+        self.fps = self._combo_row(right_settings, "FPS",
                                   ["24", "25", "30", "50", "60"])
-        self.bitrate = self._combo_row(self.encode_page, "Video bitrate (Mbps)",
+        self.bitrate = self._combo_row(right_settings, "Video bitrate (Mbps)",
                                       ["1", "2", "3", "5", "8", "9", "10", "16", "25", "35"])
         self.audio_codec = self._combo_row(
-            self.encode_page, T("Ses codec", "Audio codec"),
+            right_settings, T("Ses codec", "Audio codec"),
                                            ["aac", "mp3"])
         self.audio_bitrate = self._combo_row(
-            self.encode_page, T("Ses bitrate (kbps)", "Audio bitrate (kbps)"),
+            right_settings, T("Ses bitrate (kbps)", "Audio bitrate (kbps)"),
                                              ["96", "128", "160", "192", "256", "320"])
         self.estimate_label = ctk.CTkLabel(
             self.encode_page,
@@ -603,7 +1122,7 @@ class MediaEditorApp(ctk.CTk):
         try:
             info = probe(path)
         except MontageError as exc:
-            messagebox.showerror(
+            self.dialog(
                 T("Ana video okunamadı", "Main video could not be read"),
                 error_text(str(exc)))
             return
@@ -653,6 +1172,10 @@ class MediaEditorApp(ctk.CTk):
         if hasattr(self, "profile"):
             self.profile.configure(values=self.profile_names())
         if hasattr(self, "quick_slot"):
+            values = self.quick_slot_names()
+            self.quick_slot.configure(values=values)
+            self.quick_slot.set(values[0])
+            self.active_quick_slot = canonical(values[0])
             self.update_quick_slot_color()
         self.encoding_field_changed()
 
@@ -703,27 +1226,50 @@ class MediaEditorApp(ctk.CTk):
     def update_quick_slot_color(self):
         filled = canonical(self.quick_slot.get()) in self.orientation_profiles()
         self.quick_slot.configure(
-            fg_color="#274b6d" if filled else "#30363d",
-            button_color="#345f88" if filled else "#484f58")
+            fg_color="#18384a" if filled else "#111d2d",
+            border_color="#3a7184" if filled else "#294254",
+            button_color="#24566a" if filled else "#183b43",
+            button_hover_color="#2d6a7e" if filled else "#21535a")
 
     def save_quick_profile(self):
-        slot = canonical(self.quick_slot.get())
+        slot = self.quick_slot.get().strip()
+        if not slot:
+            self.dialog(
+                T("İsim gerekli", "Name required"),
+                T("Hızlı ayar için bir isim yazın.",
+                  "Enter a name for the quick setting."))
+            return
+        slot = canonical(slot)
         profiles = self.orientation_profiles()
-        if slot in profiles and not messagebox.askyesno(
+        if slot in profiles and not self.dialog(
                 T("Hızlı ayarın üzerine yazılsın mı?", "Overwrite quick setting?"),
                 T(f"{slot} daha önce kaydedilmiş. Üzerine yazılsın mı?",
-                  f"{slot.replace('Hızlı Ayar', 'Quick Setting')} is already saved. Overwrite it?")):
+                  f"{slot.replace('Hızlı Ayar', 'Quick Setting')} is already saved. Overwrite it?"),
+                question=True):
+            return
+        previous_slot = getattr(self, "active_quick_slot", slot)
+        if previous_slot != slot and previous_slot in profiles:
+            del profiles[previous_slot]
+        elif slot not in profiles and len(profiles) >= 5:
+            self.dialog(
+                T("Hızlı ayar sınırı", "Quick setting limit"),
+                T("Bu video yönü için en fazla 5 hızlı ayar kaydedilebilir.",
+                  "Up to 5 quick settings can be saved for this orientation."))
             return
         profiles[slot] = self.current_profile_data()
         data = load_app_settings()
         data["quick_profiles"] = self.quick_profiles
         save_app_settings(data)
         self.profile.configure(values=self.profile_names())
-        slot_number = slot.rsplit(" ", 1)[-1]
-        self.profile.set(T(slot, f"Quick Setting {slot_number}"))
+        self.quick_slot.configure(values=self.quick_slot_names())
+        self.quick_slot.set(slot)
+        self.active_quick_slot = slot
+        self.profile.set(
+            T(slot, f"Quick Setting {slot.rsplit(' ', 1)[-1]}")
+            if slot.startswith("Hızlı Ayar ") else slot)
         self.update_quick_slot_color()
         self.show_quick_controls(False)
-        messagebox.showinfo(
+        self.dialog(
             T("Hızlı ayar kaydedildi", "Quick setting saved"),
             T(f"{slot} kaydedildi.",
               f"{slot.replace('Hızlı Ayar', 'Quick Setting')} was saved."))
@@ -852,14 +1398,14 @@ class MediaEditorApp(ctk.CTk):
 
     def measure_pc(self):
         if not self.source:
-            messagebox.showerror(
+            self.dialog(
                 T("PC gücü ölçülemedi", "PC performance could not be measured"),
                 T("Önce ana MP4 dosyasını seçin.", "Select the main MP4 file first."))
             return
         try:
             settings = self.settings()
         except MontageError as exc:
-            messagebox.showerror(
+            self.dialog(
                 T("PC gücü ölçülemedi", "PC performance could not be measured"),
                 error_text(str(exc)))
             return
@@ -890,18 +1436,20 @@ class MediaEditorApp(ctk.CTk):
             _, duration = validate(job)
             size = human_size(estimated_bytes(duration, job.encode))
         except MontageError as exc:
-            messagebox.showerror(
+            self.dialog(
                 T("İşlem başlatılamadı", "Processing could not start"),
                 error_text(str(exc)))
             return
-        if job.output.exists() and not messagebox.askyesno(
+        if job.output.exists() and not self.dialog(
                 T("Dosya mevcut", "File already exists"),
                 T("Seçilen çıktı dosyasının üzerine yazılsın mı?",
-                  "Overwrite the selected output file?")):
+                  "Overwrite the selected output file?"),
+                question=True):
             return
         self.cancel_event.clear()
         self.start_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
+        self.language_switch.configure(state="disabled")
         self.status.configure(
             text=f"{T('İşleniyor… Tahmini çıktı', 'Processing… Estimated output')} {size}",
             text_color=TEXT)
@@ -936,10 +1484,12 @@ class MediaEditorApp(ctk.CTk):
                 elif kind == "done":
                     self.start_button.configure(state="normal")
                     self.cancel_button.configure(state="disabled")
+                    self.language_switch.configure(state="normal")
                     self.status.configure(
                         text=f"{T('Tamamlandı', 'Completed')}: {value}",
                         text_color=GREEN)
-                    messagebox.showinfo(
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                    self.dialog(
                         T("Montaj tamamlandı", "Editing completed"),
                         f"{T('Çıktı oluşturuldu', 'Output created')}:\n{value}")
                 elif kind == "benchmark_done":
@@ -964,13 +1514,14 @@ class MediaEditorApp(ctk.CTk):
                     self.pc_result.configure(
                         text=T("Ölçüm başarısız", "Measurement failed"),
                         text_color=RED)
-                    messagebox.showerror(
+                    self.dialog(
                         T("PC gücü ölçülemedi",
                           "PC performance could not be measured"),
                         error_text(value))
                 else:
                     self.start_button.configure(state="normal")
                     self.cancel_button.configure(state="disabled")
+                    self.language_switch.configure(state="normal")
                     self.progress.set(0)
                     if "iptal edildi" in value.lower():
                         self.status.configure(text=T(
@@ -981,7 +1532,7 @@ class MediaEditorApp(ctk.CTk):
                         self.status.configure(
                             text=T("İşlem başarısız", "Processing failed"),
                             text_color=RED)
-                        messagebox.showerror(
+                        self.dialog(
                             T("İşlem tamamlanamadı", "Processing could not complete"),
                             error_text(value))
         except queue.Empty:
@@ -991,5 +1542,4 @@ class MediaEditorApp(ctk.CTk):
 
 if __name__ == "__main__":
     ctk.set_appearance_mode("dark")
-    ctk.set_default_color_theme("blue")
     MediaEditorApp().mainloop()

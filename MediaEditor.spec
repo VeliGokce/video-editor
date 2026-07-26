@@ -17,7 +17,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=binaries,
-    datas=[('assets/fonts', 'assets/fonts')],
+    datas=[('assets/fonts', 'assets/fonts'), ('assets/media-editor.ico', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -46,4 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/media-editor.ico',
 )
